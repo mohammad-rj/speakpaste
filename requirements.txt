@@ -1,0 +1,9 @@
+keyboard
+sounddevice
+soundfile
+numpy
+requests
+pyperclip
+pystray
+pillow
+python-dotenv
