@@ -18,7 +18,7 @@ Hold a hotkey, speak, release — your words appear instantly wherever your curs
 ## Quick Start (2 minutes)
 
 ### 1. Download
-Download `SpeakPaste.exe` from [Releases](../../releases)
+Download `SpeakPaste.exe` from [Releases](https://github.com/mohammad-rj/speakpaste/releases)
 
 ### 2. Get Free API Key
 1. Go to [console.groq.com/keys](https://console.groq.com/keys)
@@ -67,7 +67,7 @@ Want to build from source or contribute?
 
 ### Setup
 ```bash
-git clone https://github.com/user/speakpaste.git
+git clone https://github.com/mohammad-rj/speakpaste.git
 cd speakpaste
 pip install -r requirements.txt
 cp .env.example .env
