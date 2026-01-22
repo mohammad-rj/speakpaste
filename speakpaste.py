@@ -8,13 +8,14 @@ import sounddevice as sd
 import soundfile as sf
 import numpy as np
 import requests
-import pyperclip
 import tempfile
 import os
 import sys
 import threading
 import time
 import winreg
+import ctypes
+from ctypes import wintypes
 from queue import Queue
 from collections import deque
 from dotenv import load_dotenv
@@ -48,6 +49,34 @@ logs = deque(maxlen=20)
 tray_icon = None
 audio_stream = None
 running = True
+
+# Windows API Definitions (64-bit Compatible)
+user32 = ctypes.windll.user32
+INPUT_KEYBOARD = 1
+KEYEVENTF_UNICODE = 0x0004
+KEYEVENTF_KEYUP = 0x0002
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_ulonglong)  # 64-bit pointer
+    ]
+
+
+class INPUT_UNION(ctypes.Union):
+    _fields_ = [("ki", KEYBDINPUT)]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [
+        ("type", wintypes.DWORD),
+        ("iu", INPUT_UNION),
+        ("_pad", ctypes.c_ubyte * 8)  # Padding for 64-bit alignment
+    ]
 
 
 def log(msg):
@@ -135,16 +164,56 @@ def transcribe(audio_path):
             pass
 
 
+def send_unicode_char(char_code):
+    """Sends a single unicode character event"""
+    # Key Down
+    input_down = INPUT()
+    input_down.type = INPUT_KEYBOARD
+    input_down.iu.ki.wVk = 0
+    input_down.iu.ki.wScan = char_code
+    input_down.iu.ki.dwFlags = KEYEVENTF_UNICODE
+
+    # Key Up
+    input_up = INPUT()
+    input_up.type = INPUT_KEYBOARD
+    input_up.iu.ki.wVk = 0
+    input_up.iu.ki.wScan = char_code
+    input_up.iu.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+
+    # Send both events
+    user32.SendInput(1, ctypes.byref(input_down), ctypes.sizeof(INPUT))
+    user32.SendInput(1, ctypes.byref(input_up), ctypes.sizeof(INPUT))
+
+
 def type_text(text):
     if not text:
         return
+
+    # 1. Wait for physical keys to release
     keys = HOTKEY.split('+')
     while any(keyboard.is_pressed(k) for k in keys):
-        time.sleep(0.02)
-    time.sleep(0.05)
-    pyperclip.copy(text)
-    keyboard.send('ctrl+v')
-    log("✅ Pasted!")
+        time.sleep(0.05)
+
+    # 2. Safety delay (Focus settle)
+    time.sleep(0.3)
+
+    # 3. Release logical keys (Win/Alt) to prevent shortcuts
+    for k in ['left windows', 'right windows', 'alt', 'ctrl', 'shift']:
+        try:
+            keyboard.release(k)
+        except:
+            pass
+
+    # 4. Type character by character using pure Unicode injection
+    try:
+        for char in text:
+            send_unicode_char(ord(char))
+            time.sleep(0.001)  # Tiny delay for stability
+
+        log("✅ Typed (Universal Mode)")
+
+    except Exception as e:
+        log(f"❌ Error: {e}")
 
 
 def on_hotkey_release():
