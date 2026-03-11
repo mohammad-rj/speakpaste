@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "SpeakPaste Bridge",
+  "version": "1.0",
+  "description": "Google Web Speech API bridge for SpeakPaste",
+  "permissions": [
+    "offscreen"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
