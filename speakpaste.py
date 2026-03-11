@@ -3,8 +3,9 @@ SpeakPaste - Voice to Text
 Hold Win+Alt to record, release to transcribe and paste.
 
 Engines:
-  groq   — record mic → Groq Whisper API  (default)
-  google — Chrome extension + Web Speech API (Google's engine, free)
+  google     — Google Speech API (unofficial, no API key, no Chrome)  [default]
+  groq       — Groq Whisper API (requires free API key)
+  google-ext — Chrome extension + Offscreen Document (requires Chrome in background)
 """
 
 import keyboard
@@ -40,7 +41,7 @@ GROQ_API_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 HOTKEY    = os.getenv("HOTKEY",    "win+alt")
 LANGUAGE  = os.getenv("LANGUAGE",  "fa")
 MODEL     = os.getenv("MODEL",     "whisper-large-v3-turbo")
-ENGINE    = os.getenv("ENGINE",    "groq")   # "groq" | "google" | "google-ext"
+ENGINE    = os.getenv("ENGINE",    "google") # "google" | "groq" | "google-ext"
 WS_PORT   = int(os.getenv("WS_PORT", "9137"))
 
 SAMPLE_RATE = 16000
@@ -110,7 +111,7 @@ def create_icon(state="idle"):
     return img
 
 
-# ─── Groq Engine ──────────────────────────────────────────────────────────────
+# ─── Audio Recording (groq + google engines) ─────────────────────────────────
 
 def _audio_callback(indata, frames, time_info, status):
     if is_recording:
@@ -163,16 +164,11 @@ def _transcribe_google_direct(audio_path):
         import speech_recognition as sr
         r = sr.Recognizer()
         with sr.AudioFile(audio_path) as source:
-            audio = sr.AudioData(
-                source.stream.read(),
-                source.SAMPLE_RATE,
-                source.SAMPLE_WIDTH,
-            )
+            audio = r.record(source)
         text = r.recognize_google(audio, language=LANGUAGE)
         log(f">> {text}")
         return text
     except Exception as sr_err:
-        # ImportError, UnknownValueError, RequestError all caught here
         log(f"Google error: {sr_err}")
         return None
     finally:

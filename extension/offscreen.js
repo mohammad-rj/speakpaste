@@ -30,7 +30,7 @@ function connect() {
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
 
-    if (msg.cmd === 'start') startRecognition(msg.lang || 'fa');
+    if (msg.cmd === 'start') startRecognition(msg.lang || 'fa-IR');
     else if (msg.cmd === 'stop') stopRecognition();
   };
 
