@@ -1,98 +1,113 @@
-# SpeakPaste 🎙️
+# SpeakPaste
 
 **Talk → Text → Paste. Anywhere.**
 
-Hold a hotkey, speak, release — your words appear instantly wherever your cursor is. No more typing. Just talk.
+Hold a hotkey, speak, release — your words appear instantly wherever your cursor is.
 
-![Windows](https://img.shields.io/badge/Windows-10%2F11-blue) ![License](https://img.shields.io/badge/License-MIT-green) ![Groq](https://img.shields.io/badge/Powered%20by-Groq%20Whisper-orange)
+![Windows](https://img.shields.io/badge/Windows-10%2F11-blue) ![License](https://img.shields.io/badge/License-MIT-green)
 
-## Why SpeakPaste?
+## Download
 
-- ⚡ **Instant** — Transcription in ~1 second (Groq is fast!)
-- 🌍 **50+ Languages** — Persian, Arabic, English, German, French, Spanish, Chinese, Japanese...
-- 🎯 **Works Everywhere** — Browser, IDE, Notepad, Discord, Slack, anywhere you can type
-- 🆓 **Free** — Groq gives you ~8 hours of transcription daily for free
-- 🖥️ **System Tray** — Runs quietly in background, shows status on hover
-- 🚀 **Startup Option** — Auto-start with Windows
-
-## Quick Start (2 minutes)
-
-### 1. Download
-Download `SpeakPaste.exe` from [Releases](https://github.com/mohammad-rj/speakpaste/releases)
-
-### 2. Get Free API Key
-1. Go to [console.groq.com/keys](https://console.groq.com/keys)
-2. Sign up with Google (free)
-3. Click "Create API Key"
-4. Copy the key
-
-### 3. Configure
-Create a file named `.env` in the same folder as `SpeakPaste.exe`:
-```
-GROQ_API_KEY=your_api_key_here
-```
-
-### 4. Run
-Double-click `SpeakPaste.exe` — green icon appears in system tray.
-
-### 5. Use
-- Hold **Win+Alt** → Speak → Release → Text appears!
-- Hover over tray icon to see status
-- Right-click tray icon for options
-
-## Configuration
-
-Edit `.env` file to customize:
-
-```env
-GROQ_API_KEY=gsk_xxxxx          # Required - your Groq API key
-HOTKEY=win+alt                   # Options: ctrl+alt, ctrl+shift+space, f9
-LANGUAGE=fa                      # fa=Persian, en=English, ar=Arabic, de=German...
-MODEL=whisper-large-v3-turbo     # Fastest model
-```
-
-## Supported Languages
-
-English, Persian/Farsi, Arabic, German, French, Spanish, Portuguese, Italian, Dutch, Russian, Chinese, Japanese, Korean, Turkish, Hindi, and [50+ more](https://github.com/openai/whisper#available-models-and-languages).
+Grab the latest **[SpeakPaste.exe](https://github.com/mohammad-rj/speakpaste/releases/latest)** — single file, no install.
 
 ---
 
-## For Developers
+## Engines
 
-Want to build from source or contribute?
+| Engine | Quality | Free | Requires |
+|--------|---------|------|----------|
+| `google` | Google (same as Android) | Yes | Nothing |
+| `google-cloud` | Google Cloud STT (official) | Free tier | API key |
+| `groq` | Whisper large-v3-turbo | ~8h/day free | API key |
+| `google-ext` | Google (Chrome) | Yes | Chrome in background |
 
-### Requirements
-- Python 3.8+
-- Windows 10/11
+Default: `google` — no key, no setup.
 
-### Setup
+---
+
+## Quick Start
+
+### Option A — Exe (recommended)
+
+1. Download **SpeakPaste.exe** from [Releases](https://github.com/mohammad-rj/speakpaste/releases/latest)
+2. Run it — green icon appears in system tray
+3. Right-click → **Settings** to pick your engine and configure
+4. Hold **Win+Alt**, speak, release — text appears at cursor
+
+### Option B — Run from source
+
 ```bash
 git clone https://github.com/mohammad-rj/speakpaste.git
 cd speakpaste
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env
-# Edit .env with your API key
 python speakpaste.py
 ```
 
-### Build Executable
-```bash
-pip install pyinstaller
-pyinstaller --onefile --noconsole --name SpeakPaste speakpaste.py
-# Output: dist/SpeakPaste.exe
-```
+---
 
-## How It Works
+## Settings
 
-1. Captures audio from microphone while hotkey is held
-2. Sends audio to Groq's Whisper API for transcription
-3. Copies result to clipboard
-4. Simulates Ctrl+V to paste at cursor position
+All configuration is done via the built-in **Settings window** (tray → Settings):
 
-## License
+- **Engine** — pick your STT backend; API key field expands inline when needed
+- **Hotkey** — default `win+alt`, change to anything
+- **Language** — e.g. `fa`, `en`, `ar` (or full BCP-47 like `fa-IR`)
+- **Microphone mode** — Always-on or On-demand (toggle live from tray)
+- **Check for updates** — notified via tray tooltip on startup
 
-MIT — Use it, modify it, share it.
+Settings are saved to `settings.json` next to the exe.
 
 ---
 
-**Made with ❤️ for people who hate typing**
+## Engine details
+
+**`google`** (default — recommended for most users)
+- Google's speech API via [SpeechRecognition](https://github.com/Uberi/speech_recognition)
+- Same engine as Android voice typing — excellent Persian/Farsi support
+- Unofficial endpoint, no API key, no Chrome required
+- Caveat: unofficial, could change without notice
+
+**`google-cloud`**
+- Official [Google Cloud Speech-to-Text](https://cloud.google.com/speech-to-text) REST API
+- Higher accuracy and reliability than the unofficial engine
+- Free tier: 60 min/month — sufficient for personal use
+- Get a key: [console.cloud.google.com](https://console.cloud.google.com) → Speech-to-Text API → Credentials
+
+**`groq`**
+- Records audio → sends to [Groq Whisper API](https://console.groq.com)
+- Free API key, ~8 hours/day limit
+- Very accurate, 50+ languages
+
+**`google-ext`**
+- Chrome Manifest V3 extension with Offscreen Document
+- `webkitSpeechRecognition` running fully hidden in background
+- Requires Chrome installed and running
+- Setup: `chrome://extensions` → Developer mode → Load unpacked → select `extension/`
+
+---
+
+## Microphone mode
+
+| Mode | Mic | Pre-roll | Privacy |
+|------|-----|----------|---------|
+| Always-on | Open all the time | 500ms buffer — no cut-off | Mic icon always visible |
+| On-demand | Opens only while hotkey held | None | Closed when idle |
+
+Toggle live from tray without restarting.
+
+---
+
+## Build from source
+
+```bash
+pip install pyinstaller
+pyinstaller speakpaste.spec
+```
+
+Output: `dist/SpeakPaste.exe`
+
+## License
+
+MIT
