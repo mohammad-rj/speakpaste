@@ -1,10 +1,10 @@
 .env
+settings.json
 __pycache__/
 *.pyc
 *.pyo
 *.exe
 build/
 dist/
-*.spec
 .venv/
 venv/
