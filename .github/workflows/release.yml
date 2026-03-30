@@ -40,9 +40,11 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add speakpaste.py
-          git commit -m "release: v${{ github.event.inputs.version }}"
+          if ! git diff --cached --quiet; then
+            git commit -m "release: v${{ github.event.inputs.version }}"
+            git push
+          fi
           git tag "v${{ github.event.inputs.version }}"
-          git push
           git push --tags
 
       - name: Install dependencies
