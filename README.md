@@ -14,12 +14,14 @@ Grab the latest **[SpeakPaste.exe](https://github.com/mohammad-rj/speakpaste/rel
 
 ## Engines
 
-| Engine | Quality | Free | Requires |
-|--------|---------|------|----------|
-| `google` | Google (same as Android) | Yes | Nothing |
-| `google-cloud` | Google Cloud STT (official) | Free tier | API key |
-| `groq` | Whisper large-v3-turbo | ~8h/day free | API key |
-| `google-ext` | Google (Chrome) | Yes | Chrome in background |
+| Engine | Output | Free | Requires |
+|--------|--------|------|----------|
+| `google` | Transcribed text | Yes | Nothing |
+| `google-cloud` | Transcribed text | Free tier | API key |
+| `groq` | Transcribed text | ~8h/day free | API key |
+| `google-ext` | Transcribed text | Yes | Chrome in background |
+| `gemini-lite` | English programming prompt | Free tier | Gemini API key |
+| `gemini-flash` | English programming prompt | Free tier | Gemini API key |
 
 Default: `google` — no key, no setup.
 
@@ -85,6 +87,17 @@ Settings are saved to `settings.json` next to the exe.
 - `webkitSpeechRecognition` running fully hidden in background
 - Requires Chrome installed and running
 - Setup: `chrome://extensions` → Developer mode → Load unpacked → select `extension/`
+
+**`gemini-lite`**
+- Records audio → Google STT (free) → text → [Gemini Flash Lite](https://aistudio.google.com) → English programming prompt
+- Speak in any language — output is always a clean English prompt for your AI coding assistant
+- Get a free key: [aistudio.google.com](https://aistudio.google.com) → Get API key
+- System prompt is fully customizable in Settings
+
+**`gemini-flash`**
+- Records audio → sends WAV directly to [Gemini Flash](https://aistudio.google.com) (multimodal) → English programming prompt
+- Skips the STT step entirely — Gemini understands voice directly
+- Same Gemini API key as `gemini-lite`; configurable system prompt
 
 ---
 

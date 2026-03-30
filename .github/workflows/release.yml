@@ -1,0 +1,61 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 1.5.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Bump version in speakpaste.py
+        shell: python
+        run: |
+          import re
+          version = "${{ github.event.inputs.version }}".lstrip("v")
+          src = open("speakpaste.py", encoding="utf-8").read()
+          src = re.sub(r'(VERSION\s*=\s*")[^"]+(")', f'\\g<1>{version}\\g<2>', src)
+          open("speakpaste.py", "w", encoding="utf-8").write(src)
+          print(f"Bumped to {version}")
+
+      - name: Commit, tag, and push
+        shell: bash
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add speakpaste.py
+          git commit -m "release: v${{ github.event.inputs.version }}"
+          git tag "v${{ github.event.inputs.version }}"
+          git push
+          git push --tags
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable
+        run: pyinstaller speakpaste.spec
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          files: dist/SpeakPaste.exe
+          generate_release_notes: true

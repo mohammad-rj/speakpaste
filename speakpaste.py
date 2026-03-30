@@ -7,6 +7,8 @@ Engines:
   groq          — Groq Whisper API (requires free API key)
   google-ext    — Chrome extension + Offscreen Document (requires Chrome in background)
   google-cloud  — Google Cloud Speech-to-Text REST API (official, requires API key)
+  gemini-lite   — Google STT → Gemini Flash Lite → English programming prompt
+  gemini-flash  — Gemini Flash multimodal (voice → English programming prompt directly)
 """
 
 import keyboard
@@ -39,7 +41,7 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VERSION       = "1.3.1"
+VERSION       = "1.4.0"
 GITHUB_REPO   = "mohammad-rj/speakpaste"
 GITHUB_URL    = f"https://github.com/{GITHUB_REPO}"
 
@@ -48,16 +50,34 @@ GROQ_API_URL  = "https://api.groq.com/openai/v1/audio/transcriptions"
 SAMPLE_RATE   = 16000
 CHANNELS      = 1
 
+GEMINI_DEFAULT_SYSTEM_PROMPT = (
+    "You are a voice-to-prompt converter inside a coding chatbot. "
+    "The user speaks conversationally (in any language) to describe what they want to code. "
+    "Your job: output ONLY the English prompt the user would type to an AI coding assistant. "
+    "Keep it close to the original intent — do not add features or details the user didn't mention. "
+    "If the request is short and simple, keep the output short and simple. "
+    "Output nothing else — no explanation, no 'here is your prompt', no quotes, just the prompt.\n\n"
+    "Examples:\n"
+    "Input: یه تابع بنویس که لیست رو sort کنه\n"
+    "Output: Write a function that sorts a list.\n\n"
+    "Input: می‌خوام بدونم چرا این کد کار نمی‌کنه\n"
+    "Output: Why is this code not working?\n\n"
+    "Input: یه کلاس پایتون برای مدیریت کاربر بنویس با login و logout\n"
+    "Output: Write a Python class for user management with login and logout methods."
+)
+
 _DEFAULTS = {
-    "engine":              "google",
-    "hotkey":              "win+alt",
-    "language":            "fa",
-    "mic_mode":            "always",
-    "groq_api_key":        "",
-    "model":               "whisper-large-v3-turbo",
+    "engine":               "google",
+    "hotkey":               "win+alt",
+    "language":             "fa",
+    "mic_mode":             "always",
+    "groq_api_key":         "",
+    "model":                "whisper-large-v3-turbo",
     "google_cloud_api_key": "",
-    "ws_port":             9137,
-    "check_updates":       True,
+    "ws_port":              9137,
+    "check_updates":        True,
+    "gemini_api_key":       "",
+    "gemini_system_prompt": GEMINI_DEFAULT_SYSTEM_PROMPT,
 }
 
 # ─── Settings Load / Save ─────────────────────────────────────────────────────
@@ -106,6 +126,8 @@ MODEL                = _cfg["model"]
 GOOGLE_CLOUD_API_KEY = _cfg["google_cloud_api_key"]
 WS_PORT              = _cfg["ws_port"]
 CHECK_UPDATES        = _cfg["check_updates"]
+GEMINI_API_KEY       = _cfg.get("gemini_api_key", "")
+GEMINI_SYSTEM_PROMPT = _cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYSTEM_PROMPT)
 
 # ─── State ────────────────────────────────────────────────────────────────────
 
@@ -258,6 +280,62 @@ def _stop_recording():
     return tmp.name
 
 
+# ─── Engine Registry & Adapters ───────────────────────────────────────────────
+#
+# ENGINE_REGISTRY  — metadata: which provider/model/input-type each engine uses
+# PROVIDER_ADAPTERS — how to talk to each provider's API
+#
+# Adding a new provider: implement a class with the same interface as GeminiAdapter,
+# then add it to PROVIDER_ADAPTERS. Adding a new model from an existing provider:
+# add one entry to ENGINE_REGISTRY pointing to the existing adapter.
+
+ENGINE_REGISTRY = {
+    "google":       {"provider": "legacy", "input": "audio"},
+    "google-cloud": {"provider": "legacy", "input": "audio"},
+    "groq":         {"provider": "legacy", "input": "audio"},
+    "google-ext":   {"provider": "legacy", "input": "ext"},
+    "gemini-lite":  {"provider": "gemini",  "model": "gemini-3.1-flash-lite-preview", "input": "text"},
+    "gemini-flash": {"provider": "gemini",  "model": "gemini-3-flash-preview",        "input": "audio_prompt"},
+}
+
+
+class GeminiAdapter:
+    """Adapter for Google Gemini REST API (generateContent endpoint)."""
+    _BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+    def get_url(self, model, api_key):
+        return f"{self._BASE}/{model}:generateContent?key={api_key}"
+
+    def get_headers(self):
+        return {"Content-Type": "application/json"}
+
+    def build_text_request(self, system_prompt, text):
+        return {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"parts": [{"text": text}]}],
+        }
+
+    def build_audio_request(self, system_prompt, audio_b64):
+        return {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"parts": [
+                {"inlineData": {"mimeType": "audio/wav", "data": audio_b64}},
+                {"text": "Convert this voice recording into a professional English programming prompt."},
+            ]}],
+        }
+
+    def parse_response(self, data):
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError, TypeError):
+            return None
+
+
+PROVIDER_ADAPTERS = {
+    "gemini": GeminiAdapter(),
+}
+
+
 # ─── Transcription ────────────────────────────────────────────────────────────
 
 def _transcribe_google_direct(audio_path):
@@ -348,6 +426,69 @@ def _transcribe_groq(audio_path):
     finally:
         try:
             os.unlink(audio_path)
+        except Exception:
+            pass
+
+
+def _transcribe_gemini(wav_path):
+    import base64
+    cfg     = ENGINE_REGISTRY[ENGINE]
+    adapter = PROVIDER_ADAPTERS["gemini"]
+
+    if not GEMINI_API_KEY:
+        log("Gemini: API key not set — open Settings")
+        try:
+            os.unlink(wav_path)
+        except Exception:
+            pass
+        return None
+
+    try:
+        if cfg["input"] == "text":
+            # Step 1: free Google STT to get the transcribed text
+            log("Transcribing (Google)...")
+            try:
+                import speech_recognition as sr
+                r = sr.Recognizer()
+                with sr.AudioFile(wav_path) as source:
+                    audio_data = r.record(source)
+                source_text = r.recognize_google(audio_data, language=LANGUAGE)
+                log(f"(STT) {source_text}")
+            except Exception as e:
+                log(f"STT error: {e}")
+                return None
+            # Step 2: send text to Gemini
+            log("Converting to prompt (Gemini Lite)...")
+            body = adapter.build_text_request(GEMINI_SYSTEM_PROMPT, source_text)
+
+        else:  # audio_prompt — send WAV directly to Gemini
+            log("Converting voice to prompt (Gemini Flash)...")
+            with open(wav_path, "rb") as f:
+                audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+            body = adapter.build_audio_request(GEMINI_SYSTEM_PROMPT, audio_b64)
+
+        resp = requests.post(
+            adapter.get_url(cfg["model"], GEMINI_API_KEY),
+            headers=adapter.get_headers(),
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            text = adapter.parse_response(resp.json())
+            if text:
+                log(f">> {text}")
+                return text
+            log("Gemini: empty response")
+            return None
+        log(f"Gemini error {resp.status_code}: {resp.text[:120]}")
+        return None
+
+    except Exception as e:
+        log(f"Gemini error: {e}")
+        return None
+    finally:
+        try:
+            os.unlink(wav_path)
         except Exception:
             pass
 
@@ -492,6 +633,9 @@ def on_hotkey_release():
     elif ENGINE == "google-cloud":
         path = _stop_recording()
         text = _transcribe_google_cloud(path) if path else None
+    elif ENGINE in ("gemini-lite", "gemini-flash"):
+        path = _stop_recording()
+        text = _transcribe_gemini(path) if path else None
     else:  # groq
         path = _stop_recording()
         text = _transcribe_groq(path) if path else None
@@ -523,6 +667,7 @@ def keyboard_listener():
 
 def _apply_settings(new_cfg):
     global ENGINE, HOTKEY, LANGUAGE, MIC_MODE, GROQ_API_KEY, MODEL, WS_PORT, CHECK_UPDATES
+    global GEMINI_API_KEY, GEMINI_SYSTEM_PROMPT
 
     old_mic    = MIC_MODE
     old_engine = ENGINE
@@ -536,6 +681,8 @@ def _apply_settings(new_cfg):
     WS_PORT              = new_cfg["ws_port"]
     MIC_MODE             = new_cfg["mic_mode"]
     CHECK_UPDATES        = new_cfg["check_updates"]
+    GEMINI_API_KEY       = new_cfg.get("gemini_api_key", "")
+    GEMINI_SYSTEM_PROMPT = new_cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYSTEM_PROMPT)
 
     # Apply mic mode change live
     if audio_stream and old_mic != MIC_MODE:
@@ -586,19 +733,25 @@ def open_settings(icon=None, item=None):
         # ── Engine ──────────────────────────────────────────────────────────
         section("Engine")
         engine_var = tk.StringVar(value=ENGINE)
-        engines = [("Google  —  free, unofficial, no key", "google"),
-                   ("Google Cloud  —  official, API key required", "google-cloud"),
-                   ("Groq Whisper  —  API key required", "groq"),
-                   ("Google Extension  —  Chrome in background", "google-ext")]
-        for label, val in engines:
+        rb_cfg = dict(bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
+                      activebackground="#1e1e1e", activeforeground="#ffffff",
+                      font=("Segoe UI", 9))
+        for label, val in [
+                ("Google  —  free, unofficial, no key",          "google"),
+                ("Google Cloud  —  official, API key required",  "google-cloud"),
+                ("Groq Whisper  —  API key required",            "groq"),
+                ("Google Extension  —  Chrome in background",    "google-ext")]:
             tk.Radiobutton(win, text=label, variable=engine_var, value=val,
-                           bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
-                           activebackground="#1e1e1e", activeforeground="#ffffff",
-                           font=("Segoe UI", 9)).pack(anchor="w")
+                           **rb_cfg).pack(anchor="w")
+        tk.Frame(win, bg="#333333", height=1).pack(fill="x", pady=(6, 4), padx=4)
+        for label, val in [
+                ("Gemini Flash Lite  —  transcribe \u2192 prompt", "gemini-lite"),
+                ("Gemini Flash  —  voice \u2192 prompt directly",  "gemini-flash")]:
+            tk.Radiobutton(win, text=label, variable=engine_var, value=val,
+                           **rb_cfg).pack(anchor="w")
 
         # ── Inline engine config (fixed-height slot below radio buttons) ────
-        engine_extra = tk.Frame(win, bg="#1e1e1e", height=74)
-        engine_extra.pack_propagate(False)   # never resize — window stays stable
+        engine_extra = tk.Frame(win, bg="#1e1e1e")
         engine_extra.pack(fill="x")
 
         # Groq sub-frame
@@ -632,20 +785,58 @@ def open_settings(icon=None, item=None):
                  text="console.cloud.google.com → Speech-to-Text API → Credentials",
                  bg="#252525", fg="#666666", font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
 
+        # Gemini sub-frame (shared for gemini-lite and gemini-flash)
+        gemini_frame = tk.Frame(engine_extra, bg="#252525", padx=12, pady=8)
+
+        row_gk = tk.Frame(gemini_frame, bg="#252525")
+        row_gk.pack(fill="x", pady=2)
+        tk.Label(row_gk, text="API Key:", width=14, anchor="w",
+                 bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(side="left")
+        gemini_key_var = tk.StringVar(value=GEMINI_API_KEY)
+        tk.Entry(row_gk, textvariable=gemini_key_var, width=34, show="*",
+                 **{**ent_style, "bg": "#333333"}).pack(side="left")
+        tk.Label(gemini_frame,
+                 text="aistudio.google.com → Get API key",
+                 bg="#252525", fg="#666666", font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 6))
+
+        tk.Label(gemini_frame, text="System Prompt:", anchor="w",
+                 bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 2))
+        prompt_wrap = tk.Frame(gemini_frame, bg="#252525")
+        prompt_wrap.pack(fill="x")
+        gemini_prompt_text = tk.Text(
+            prompt_wrap, height=4, bg="#333333", fg="#ffffff",
+            insertbackground="#ffffff", relief="flat",
+            font=("Segoe UI", 9), wrap="word",
+        )
+        gemini_prompt_text.insert("1.0", GEMINI_SYSTEM_PROMPT)
+        gemini_prompt_text.pack(side="left", fill="x", expand=True)
+        prompt_sb = tk.Scrollbar(prompt_wrap, command=gemini_prompt_text.yview)
+        prompt_sb.pack(side="right", fill="y")
+        gemini_prompt_text.config(yscrollcommand=prompt_sb.set)
+
+        def _reset_prompt():
+            gemini_prompt_text.delete("1.0", "end")
+            gemini_prompt_text.insert("1.0", GEMINI_DEFAULT_SYSTEM_PROMPT)
+
+        tk.Button(gemini_frame, text="Reset to default", command=_reset_prompt,
+                  bg="#3c3c3c", fg="#888888", relief="flat", font=("Segoe UI", 8),
+                  activebackground="#4c4c4c", activeforeground="#cccccc").pack(anchor="e", pady=(4, 0))
+
         def _refresh_visibility(*_):
             eng = engine_var.get()
             for child in engine_extra.winfo_children():
                 child.pack_forget()
             if eng == "groq":
                 engine_extra.configure(bg="#252525")
-                groq_frame.configure(bg="#252525")
                 groq_frame.pack(fill="x")
             elif eng == "google-cloud":
                 engine_extra.configure(bg="#252525")
-                gcloud_frame.configure(bg="#252525")
                 gcloud_frame.pack(fill="x")
+            elif eng in ("gemini-lite", "gemini-flash"):
+                engine_extra.configure(bg="#252525")
+                gemini_frame.pack(fill="x")
             else:
-                engine_extra.configure(bg="#1e1e1e")  # invisible gap, same as bg
+                engine_extra.configure(bg="#1e1e1e")
 
         engine_var.trace_add("write", _refresh_visibility)
         _refresh_visibility()
@@ -703,6 +894,8 @@ def open_settings(icon=None, item=None):
                 "google_cloud_api_key": gcloud_key_var.get().strip(),
                 "ws_port":              WS_PORT,
                 "check_updates":        updates_var.get(),
+                "gemini_api_key":       gemini_key_var.get().strip(),
+                "gemini_system_prompt": gemini_prompt_text.get("1.0", "end-1c").strip(),
             }
             _apply_settings(new_cfg)
             win.destroy()
@@ -833,11 +1026,13 @@ def setup_tray():
 def main():
     global audio_stream, running
 
-    if ENGINE in ("groq", "google", "google-cloud"):
+    if ENGINE in ("groq", "google", "google-cloud", "gemini-lite", "gemini-flash"):
         if ENGINE == "groq" and not GROQ_API_KEY:
             log("WARNING: GROQ_API_KEY not set — open Settings to configure")
         if ENGINE == "google-cloud" and not GOOGLE_CLOUD_API_KEY:
             log("WARNING: GOOGLE_CLOUD_API_KEY not set — open Settings to configure")
+        if ENGINE in ("gemini-lite", "gemini-flash") and not GEMINI_API_KEY:
+            log("WARNING: GEMINI_API_KEY not set — open Settings to configure")
         import sounddevice as sd
         audio_stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS,
                                       callback=_audio_callback)
