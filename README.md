@@ -78,6 +78,20 @@ Supported layouts: Persian/Farsi, English, Arabic, Turkish, German, French, Russ
 
 ---
 
+## History
+
+Right-click the tray icon and select **History** to see all transcriptions from the current session.
+
+- Each entry shows the timestamp, engine used, and the output text
+- For `gemini-lite` (two-step processing): both the raw voice transcription and the converted English prompt are shown as separate rows
+- **Show voice text** checkbox toggles the raw STT row for gemini-lite entries
+- The list updates in real-time — new entries appear instantly without closing the window
+- **Clear** wipes the session history
+
+History is in-memory only and resets when SpeakPaste is restarted.
+
+---
+
 ## Engine details
 
 **`google`** (default — recommended for most users)

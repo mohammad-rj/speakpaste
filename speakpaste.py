@@ -17,6 +17,7 @@ import tempfile
 import os
 import sys
 import threading
+import datetime
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -131,7 +132,10 @@ GEMINI_API_KEY       = _cfg.get("gemini_api_key", "")
 GEMINI_SYSTEM_PROMPT = _cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYSTEM_PROMPT)
 LANG_MODE            = _cfg.get("lang_mode", "fixed")
 
-_session_lang = LANGUAGE  # language captured at hotkey press time
+_session_lang    = LANGUAGE  # language captured at hotkey press time
+_last_stt        = None      # intermediate STT text captured inside _transcribe_gemini
+_history         = deque(maxlen=50)
+_history_window  = None
 
 # ─── State ────────────────────────────────────────────────────────────────────
 
@@ -474,9 +478,11 @@ def _transcribe_groq(audio_path):
 
 
 def _transcribe_gemini(wav_path):
+    global _last_stt
     import base64
     cfg     = ENGINE_REGISTRY[ENGINE]
     adapter = PROVIDER_ADAPTERS["gemini"]
+    _last_stt = None
 
     if not GEMINI_API_KEY:
         log("Gemini: API key not set — open Settings")
@@ -496,6 +502,7 @@ def _transcribe_gemini(wav_path):
                 with sr.AudioFile(wav_path) as source:
                     audio_data = r.record(source)
                 source_text = r.recognize_google(audio_data, language=_session_lang)
+                _last_stt = source_text
                 log(f"(STT) {source_text}")
             except Exception as e:
                 log(f"STT error: {e}")
@@ -686,6 +693,12 @@ def on_hotkey_release():
         text = _transcribe_groq(path) if path else None
 
     if text:
+        _history.appendleft({
+            "time":   datetime.datetime.now().strftime("%H:%M:%S"),
+            "engine": ENGINE,
+            "stt":    _last_stt,   # None for all engines except gemini-lite
+            "output": text,
+        })
         type_text(text)
     if tray_icon:
         tray_icon.icon = create_icon("idle")
@@ -999,6 +1012,120 @@ def open_settings(icon=None, item=None):
     threading.Thread(target=_build, daemon=True).start()
 
 
+# ─── History Window ──────────────────────────────────────────────────────────
+
+def open_history(icon=None, item=None):
+    global _history_window
+
+    if _history_window and _history_window.winfo_exists():
+        _history_window.lift()
+        _history_window.focus_force()
+        return
+
+    def _build():
+        global _history_window
+
+        win = tk.Tk()
+        win.withdraw()
+        win.title("SpeakPaste - History")
+        win.configure(bg="#1e1e1e")
+        win.resizable(True, True)
+
+        # ── Top bar ──────────────────────────────────────────────────────────
+        top = tk.Frame(win, bg="#1e1e1e", padx=14, pady=8)
+        top.pack(fill="x")
+
+        show_stt_var   = tk.BooleanVar(value=True)
+        _known_len     = [-1]  # last rendered history length; -1 forces first render
+
+        def _render():
+            _known_len[0] = len(_history)
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            entries = list(_history)
+            if not entries:
+                txt.insert("end", "No history yet.", "empty")
+            for entry in entries:
+                txt.insert("end", entry["time"] + "  ", "ts")
+                txt.insert("end", entry["engine"].upper() + "\n", "eng")
+                if entry.get("stt") and show_stt_var.get():
+                    txt.insert("end", "  Voice   ", "lbl_v")
+                    txt.insert("end", entry["stt"] + "\n", "stt")
+                lbl = "  Prompt  " if entry.get("stt") else "  "
+                txt.insert("end", lbl, "lbl_p")
+                txt.insert("end", entry["output"] + "\n", "out")
+                txt.insert("end", "\n")
+            txt.config(state="disabled")
+
+        def _poll():
+            if len(_history) != _known_len[0]:
+                _render()
+            win.after(500, _poll)
+
+        tk.Checkbutton(
+            top, text="Show voice text",
+            variable=show_stt_var, command=_render,
+            bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
+            activebackground="#1e1e1e", activeforeground="#ffffff",
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+
+        def _clear():
+            _history.clear()
+            _render()
+
+        tk.Button(
+            top, text="Clear", command=_clear,
+            bg="#3c3c3c", fg="#888888", relief="flat",
+            font=("Segoe UI", 9),
+            activebackground="#4c4c4c", activeforeground="#cccccc",
+        ).pack(side="right")
+
+        ttk.Separator(win).pack(fill="x")
+
+        # ── Scrollable text area ─────────────────────────────────────────────
+        frame = tk.Frame(win, bg="#141414")
+        frame.pack(fill="both", expand=True)
+
+        txt = tk.Text(
+            frame, bg="#141414", fg="#cccccc",
+            relief="flat", padx=14, pady=10,
+            font=("Segoe UI", 9), wrap="word",
+            cursor="arrow", state="disabled",
+            spacing1=2, spacing3=2,
+        )
+        sb = tk.Scrollbar(frame, command=txt.yview,
+                          bg="#2d2d2d", troughcolor="#1e1e1e",
+                          activebackground="#3d3d3d")
+        txt.config(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+
+        txt.tag_config("empty",  foreground="#555555", font=("Segoe UI", 9, "italic"))
+        txt.tag_config("ts",     foreground="#555555")
+        txt.tag_config("eng",    foreground="#666666", font=("Segoe UI", 8))
+        txt.tag_config("lbl_v",  foreground="#555555", font=("Segoe UI", 8))
+        txt.tag_config("stt",    foreground="#888888")
+        txt.tag_config("lbl_p",  foreground="#555555", font=("Segoe UI", 8))
+        txt.tag_config("out",    foreground="#ffffff")
+
+        _render()
+        win.after(500, _poll)
+
+        _history_window = win
+        win.update_idletasks()
+        w = max(win.winfo_reqwidth(), 580)
+        h = max(win.winfo_reqheight(), 420)
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+        win.deiconify()
+        win.mainloop()
+        _history_window = None
+
+    threading.Thread(target=_build, daemon=True).start()
+
+
 # ─── System Tray ─────────────────────────────────────────────────────────────
 
 STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -1067,6 +1194,7 @@ def setup_tray():
         pystray.MenuItem(_last_log, None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Settings...", open_settings),
+        pystray.MenuItem("History...", open_history),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(_mic_status, _toggle_mic_mode,
                          checked=lambda item: MIC_MODE == "on_demand"),
