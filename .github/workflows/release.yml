@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g. 1.5.0)'
+        description: 'Version to release (e.g. 1.5.0) — must already be bumped in speakpaste.py'
         required: true
         type: string
       notes:
@@ -28,26 +28,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Bump version in speakpaste.py
-        shell: python
-        run: |
-          import re
-          version = "${{ github.event.inputs.version }}".lstrip("v")
-          src = open("speakpaste.py", encoding="utf-8").read()
-          src = re.sub(r'(VERSION\s*=\s*")[^"]+(")', f'\\g<1>{version}\\g<2>', src)
-          open("speakpaste.py", "w", encoding="utf-8").write(src)
-          print(f"Bumped to {version}")
-
-      - name: Commit, tag, and push
+      - name: Tag and push
         shell: bash
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add speakpaste.py
-          if ! git diff --cached --quiet; then
-            git commit -m "release: v${{ github.event.inputs.version }}"
-            git push
-          fi
+          git config user.name  "mohammad-rj"
+          git config user.email "dev@epid.co"
           git tag "v${{ github.event.inputs.version }}"
           git push --tags
 

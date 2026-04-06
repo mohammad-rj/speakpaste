@@ -42,7 +42,7 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VERSION       = "1.5.0"
+VERSION       = "1.6.0"
 GITHUB_REPO   = "mohammad-rj/speakpaste"
 GITHUB_URL    = f"https://github.com/{GITHUB_REPO}"
 
