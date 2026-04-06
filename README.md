@@ -56,10 +56,25 @@ All configuration is done via the built-in **Settings window** (tray → Setting
 - **Engine** — pick your STT backend; API key field expands inline when needed
 - **Hotkey** — default `win+alt`, change to anything
 - **Language** — e.g. `fa`, `en`, `ar` (or full BCP-47 like `fa-IR`)
+- **Follow Windows keyboard layout** — when checked, language is detected automatically from your active keyboard layout at the moment you press the hotkey; no manual switching needed (see below)
 - **Microphone mode** — Always-on or On-demand (toggle live from tray)
 - **Check for updates** — notified via tray tooltip on startup
 
 Settings are saved to `settings.json` next to the exe.
+
+---
+
+## Auto language detection
+
+Enable **Follow Windows keyboard layout** in Settings to let SpeakPaste detect your language automatically.
+
+- Switch to Persian layout with **Alt+Shift** → hold hotkey → speak Persian
+- Switch to English layout → hold hotkey → speak English
+- No need to open Settings to change the language — just toggle your keyboard layout as usual
+
+The language is read once when you press the hotkey and stays fixed for the entire recording session. If your layout isn't recognised, it falls back to the language set in the Language field.
+
+Supported layouts: Persian/Farsi, English, Arabic, Turkish, German, French, Russian, Portuguese, Spanish, Japanese, Korean, Chinese.
 
 ---
 

@@ -41,7 +41,7 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VERSION       = "1.4.0"
+VERSION       = "1.5.0"
 GITHUB_REPO   = "mohammad-rj/speakpaste"
 GITHUB_URL    = f"https://github.com/{GITHUB_REPO}"
 
@@ -78,6 +78,7 @@ _DEFAULTS = {
     "check_updates":        True,
     "gemini_api_key":       "",
     "gemini_system_prompt": GEMINI_DEFAULT_SYSTEM_PROMPT,
+    "lang_mode":            "fixed",
 }
 
 # ─── Settings Load / Save ─────────────────────────────────────────────────────
@@ -128,6 +129,9 @@ WS_PORT              = _cfg["ws_port"]
 CHECK_UPDATES        = _cfg["check_updates"]
 GEMINI_API_KEY       = _cfg.get("gemini_api_key", "")
 GEMINI_SYSTEM_PROMPT = _cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYSTEM_PROMPT)
+LANG_MODE            = _cfg.get("lang_mode", "fixed")
+
+_session_lang = LANGUAGE  # language captured at hotkey press time
 
 # ─── State ────────────────────────────────────────────────────────────────────
 
@@ -154,6 +158,45 @@ user32 = ctypes.windll.user32
 INPUT_KEYBOARD    = 1
 KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_KEYUP   = 0x0002
+
+# ─── Keyboard Layout Detection ────────────────────────────────────────────────
+
+_LANGID_TO_CODE = {
+    0x029: 'fa',  # Persian / Farsi
+    0x009: 'en',  # English
+    0x001: 'ar',  # Arabic
+    0x01F: 'tr',  # Turkish
+    0x007: 'de',  # German
+    0x00C: 'fr',  # French
+    0x019: 'ru',  # Russian
+    0x016: 'pt',  # Portuguese
+    0x00A: 'es',  # Spanish
+    0x011: 'ja',  # Japanese
+    0x012: 'ko',  # Korean
+    0x004: 'zh',  # Chinese
+}
+
+user32.GetKeyboardLayout.restype = ctypes.c_void_p
+
+
+def get_keyboard_layout_language():
+    """Return language code matching the currently active Windows keyboard layout."""
+    try:
+        hwnd    = user32.GetForegroundWindow()
+        tid     = user32.GetWindowThreadProcessId(hwnd, None)
+        hkl     = user32.GetKeyboardLayout(tid)
+        langid  = (hkl or 0) & 0xFFFF
+        primary = langid & 0x3FF
+        return _LANGID_TO_CODE.get(primary, LANGUAGE)
+    except Exception:
+        return LANGUAGE
+
+
+def active_language():
+    """Return the language to use: detected from keyboard layout or the fixed setting."""
+    if LANG_MODE == "keyboard":
+        return get_keyboard_layout_language()
+    return LANGUAGE
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -345,7 +388,7 @@ def _transcribe_google_direct(audio_path):
         r = sr.Recognizer()
         with sr.AudioFile(audio_path) as source:
             audio = r.record(source)
-        text = r.recognize_google(audio, language=LANGUAGE)
+        text = r.recognize_google(audio, language=_session_lang)
         log(f">> {text}")
         return text
     except Exception as e:
@@ -367,10 +410,10 @@ def _transcribe_google_cloud(audio_path):
             audio_b64 = base64.b64encode(f.read()).decode('utf-8')
 
         # BCP-47: "fa" → "fa-IR", "en" → "en-US", already full codes pass through
-        lang = LANGUAGE if '-' in LANGUAGE else {
+        lang = _session_lang if '-' in _session_lang else {
             'fa': 'fa-IR', 'en': 'en-US', 'ar': 'ar-SA',
             'tr': 'tr-TR', 'de': 'de-DE', 'fr': 'fr-FR',
-        }.get(LANGUAGE, LANGUAGE + '-' + LANGUAGE.upper())
+        }.get(_session_lang, _session_lang + '-' + _session_lang.upper())
 
         resp = requests.post(
             f"https://speech.googleapis.com/v1/speech:recognize?key={GOOGLE_CLOUD_API_KEY}",
@@ -412,7 +455,7 @@ def _transcribe_groq(audio_path):
                 GROQ_API_URL,
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
                 files={"file": ("audio.wav", f, "audio/wav")},
-                data={"model": MODEL, "language": LANGUAGE, "response_format": "text"},
+                data={"model": MODEL, "language": _session_lang, "response_format": "text"},
             )
         if resp.status_code == 200:
             text = resp.text.strip()
@@ -452,7 +495,7 @@ def _transcribe_gemini(wav_path):
                 r = sr.Recognizer()
                 with sr.AudioFile(wav_path) as source:
                     audio_data = r.record(source)
-                source_text = r.recognize_google(audio_data, language=LANGUAGE)
+                source_text = r.recognize_google(audio_data, language=_session_lang)
                 log(f"(STT) {source_text}")
             except Exception as e:
                 log(f"STT error: {e}")
@@ -612,11 +655,13 @@ def type_text(text):
 # ─── Hotkey Handlers ──────────────────────────────────────────────────────────
 
 def on_hotkey_press():
+    global _session_lang
+    _session_lang = active_language()
     if ENGINE == "google-ext":
         if not _ws_clients:
             log("[Google-ext] Extension not connected")
             return
-        _google_send({"cmd": "start", "lang": LANGUAGE})
+        _google_send({"cmd": "start", "lang": _session_lang})
         log("Listening (Google-ext)...")
         if tray_icon:
             tray_icon.icon = create_icon("recording")
@@ -667,7 +712,7 @@ def keyboard_listener():
 
 def _apply_settings(new_cfg):
     global ENGINE, HOTKEY, LANGUAGE, MIC_MODE, GROQ_API_KEY, MODEL, WS_PORT, CHECK_UPDATES
-    global GEMINI_API_KEY, GEMINI_SYSTEM_PROMPT
+    global GEMINI_API_KEY, GEMINI_SYSTEM_PROMPT, LANG_MODE
 
     old_mic    = MIC_MODE
     old_engine = ENGINE
@@ -683,6 +728,7 @@ def _apply_settings(new_cfg):
     CHECK_UPDATES        = new_cfg["check_updates"]
     GEMINI_API_KEY       = new_cfg.get("gemini_api_key", "")
     GEMINI_SYSTEM_PROMPT = new_cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYSTEM_PROMPT)
+    LANG_MODE            = new_cfg.get("lang_mode", "fixed")
 
     # Apply mic mode change live
     if audio_stream and old_mic != MIC_MODE:
@@ -854,7 +900,23 @@ def open_settings(icon=None, item=None):
         row2.pack(fill="x", pady=2)
         tk.Label(row2, text="Language:", width=12, anchor="w", **lbl_style).pack(side="left")
         lang_var = tk.StringVar(value=LANGUAGE)
-        tk.Entry(row2, textvariable=lang_var, width=20, **ent_style).pack(side="left")
+        lang_entry = tk.Entry(row2, textvariable=lang_var, width=20, **ent_style)
+        lang_entry.pack(side="left")
+
+        lang_mode_var = tk.BooleanVar(value=(LANG_MODE == "keyboard"))
+
+        def _toggle_lang_mode(*_):
+            if lang_mode_var.get():
+                lang_entry.config(state="disabled", disabledforeground="#555555")
+            else:
+                lang_entry.config(state="normal")
+
+        tk.Checkbutton(win, text="Follow Windows keyboard layout  (auto-detect Persian / English)",
+                       variable=lang_mode_var, command=_toggle_lang_mode,
+                       bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
+                       activebackground="#1e1e1e", activeforeground="#ffffff",
+                       font=("Segoe UI", 9)).pack(anchor="w", padx=(0, 0), pady=(2, 0))
+        _toggle_lang_mode()  # apply initial state
 
         # ── Microphone ──────────────────────────────────────────────────────
         section("Microphone")
@@ -888,6 +950,7 @@ def open_settings(icon=None, item=None):
                 "engine":               engine_var.get(),
                 "hotkey":               hotkey_var.get().strip(),
                 "language":             lang_var.get().strip(),
+                "lang_mode":            "keyboard" if lang_mode_var.get() else "fixed",
                 "mic_mode":             mic_var.get(),
                 "groq_api_key":         key_var.get().strip(),
                 "model":                model_var.get().strip(),

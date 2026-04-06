@@ -7,6 +7,10 @@ on:
         description: 'Version to release (e.g. 1.5.0)'
         required: true
         type: string
+      notes:
+        description: 'Release notes (markdown). What changed in this version.'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -60,4 +64,5 @@ jobs:
         with:
           tag_name: v${{ github.event.inputs.version }}
           files: dist/SpeakPaste.exe
-          generate_release_notes: true
+          body: ${{ github.event.inputs.notes }}
+          generate_release_notes: ${{ github.event.inputs.notes == '' }}
