@@ -2,13 +2,16 @@
 SpeakPaste - Voice to Text
 Hold Win+Alt to record, release to transcribe and paste.
 
-Engines:
-  google        — Google Speech API (unofficial, no API key, no Chrome)  [default]
-  groq          — Groq Whisper API (requires free API key)
-  google-ext    — Chrome extension + Offscreen Document (requires Chrome in background)
-  google-cloud  — Google Cloud Speech-to-Text REST API (official, requires API key)
-  gemini-lite   — Google STT → Gemini Flash Lite → English programming prompt
-  gemini-flash  — Gemini Flash multimodal (voice → English programming prompt directly)
+Transcription engines (stt_engine):
+  google        — Google Speech API (unofficial, free, no key)  [default]
+  groq          — Groq Whisper API (requires API key)
+  google-ext    — Chrome extension + Offscreen Document (Chrome in background)
+  google-cloud  — Google Cloud Speech-to-Text REST API (requires API key)
+
+Prompt modes (prompt_mode):
+  off           — paste raw transcript  [default]
+  gemini-lite   — transcript → Gemini Flash Lite → English prompt
+  gemini-flash  — voice → Gemini Flash directly (bypasses transcription engine)
 """
 
 import keyboard
@@ -42,7 +45,7 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VERSION       = "1.6.0"
+VERSION       = "1.7.0"
 GITHUB_REPO   = "mohammad-rj/speakpaste"
 GITHUB_URL    = f"https://github.com/{GITHUB_REPO}"
 
@@ -68,7 +71,8 @@ GEMINI_DEFAULT_SYSTEM_PROMPT = (
 )
 
 _DEFAULTS = {
-    "engine":               "google",
+    "stt_engine":           "google",
+    "prompt_mode":          "off",
     "hotkey":               "win+alt",
     "language":             "fa",
     "mic_mode":             "always",
@@ -88,7 +92,19 @@ def load_settings():
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                return {**_DEFAULTS, **json.load(f)}
+                data = json.load(f)
+            cfg = {**_DEFAULTS, **data}
+            # Migrate old engine + gemini_stt_engine fields to stt_engine + prompt_mode
+            if "stt_engine" not in data:
+                old_engine    = data.get("engine", "google")
+                old_gemini_stt = data.get("gemini_stt_engine", "google")
+                if old_engine in ("gemini-lite", "gemini-flash"):
+                    cfg["stt_engine"]  = old_gemini_stt if old_engine == "gemini-lite" else "google"
+                    cfg["prompt_mode"] = old_engine
+                else:
+                    cfg["stt_engine"]  = old_engine
+                    cfg["prompt_mode"] = "off"
+            return cfg
         except Exception:
             pass
     # Fallback: read from old .env
@@ -98,7 +114,13 @@ def load_settings():
         try:
             from dotenv import dotenv_values
             ev = dotenv_values(env_path)
-            if ev.get("ENGINE"):       cfg["engine"]       = ev["ENGINE"]
+            old_engine = ev.get("ENGINE", "google")
+            if old_engine in ("gemini-lite", "gemini-flash"):
+                cfg["stt_engine"]  = "google"
+                cfg["prompt_mode"] = old_engine
+            else:
+                cfg["stt_engine"]  = old_engine
+                cfg["prompt_mode"] = "off"
             if ev.get("HOTKEY"):       cfg["hotkey"]       = ev["HOTKEY"]
             if ev.get("LANGUAGE"):     cfg["language"]     = ev["LANGUAGE"]
             if ev.get("MIC_MODE"):     cfg["mic_mode"]     = ev["MIC_MODE"]
@@ -119,7 +141,8 @@ def save_settings(cfg):
 
 _cfg = load_settings()
 
-ENGINE               = _cfg["engine"]
+STT_ENGINE           = _cfg["stt_engine"]
+PROMPT_MODE          = _cfg["prompt_mode"]
 HOTKEY               = _cfg["hotkey"]
 LANGUAGE             = _cfg["language"]
 MIC_MODE             = _cfg["mic_mode"]
@@ -327,23 +350,10 @@ def _stop_recording():
     return tmp.name
 
 
-# ─── Engine Registry & Adapters ───────────────────────────────────────────────
-#
-# ENGINE_REGISTRY  — metadata: which provider/model/input-type each engine uses
-# PROVIDER_ADAPTERS — how to talk to each provider's API
-#
-# Adding a new provider: implement a class with the same interface as GeminiAdapter,
-# then add it to PROVIDER_ADAPTERS. Adding a new model from an existing provider:
-# add one entry to ENGINE_REGISTRY pointing to the existing adapter.
+# ─── Gemini Models & Adapters ─────────────────────────────────────────────────
 
-ENGINE_REGISTRY = {
-    "google":       {"provider": "legacy", "input": "audio"},
-    "google-cloud": {"provider": "legacy", "input": "audio"},
-    "groq":         {"provider": "legacy", "input": "audio"},
-    "google-ext":   {"provider": "legacy", "input": "ext"},
-    "gemini-lite":  {"provider": "gemini",  "model": "gemini-3.1-flash-lite-preview", "input": "text"},
-    "gemini-flash": {"provider": "gemini",  "model": "gemini-3-flash-preview",        "input": "audio_prompt"},
-}
+GEMINI_LITE_MODEL  = "gemini-3.1-flash-lite-preview"
+GEMINI_FLASH_MODEL = "gemini-3-flash-preview"
 
 
 class GeminiAdapter:
@@ -477,13 +487,39 @@ def _transcribe_groq(audio_path):
             pass
 
 
-def _transcribe_gemini(wav_path):
+def _gemini_lite_prompt(text):
+    """Send transcribed text through Gemini Flash Lite to get a prompt. Returns prompted text or None."""
     global _last_stt
-    import base64
-    cfg     = ENGINE_REGISTRY[ENGINE]
+    if not GEMINI_API_KEY:
+        log("Gemini: API key not set — open Settings")
+        return None
+    _last_stt = text
+    log("Converting to prompt (Gemini Lite)...")
     adapter = PROVIDER_ADAPTERS["gemini"]
-    _last_stt = None
+    try:
+        resp = requests.post(
+            adapter.get_url(GEMINI_LITE_MODEL, GEMINI_API_KEY),
+            headers=adapter.get_headers(),
+            json=adapter.build_text_request(GEMINI_SYSTEM_PROMPT, text),
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            result = adapter.parse_response(resp.json())
+            if result:
+                log(f">> {result}")
+                return result
+            log("Gemini: empty response")
+            return None
+        log(f"Gemini error {resp.status_code}: {resp.text[:120]}")
+        return None
+    except Exception as e:
+        log(f"Gemini error: {e}")
+        return None
 
+
+def _gemini_flash_prompt(wav_path):
+    """Send audio directly to Gemini Flash to get a prompt. Returns prompted text or None."""
+    import base64
     if not GEMINI_API_KEY:
         log("Gemini: API key not set — open Settings")
         try:
@@ -491,48 +527,26 @@ def _transcribe_gemini(wav_path):
         except Exception:
             pass
         return None
-
+    log("Converting voice to prompt (Gemini Flash)...")
+    adapter = PROVIDER_ADAPTERS["gemini"]
     try:
-        if cfg["input"] == "text":
-            # Step 1: free Google STT to get the transcribed text
-            log("Transcribing (Google)...")
-            try:
-                import speech_recognition as sr
-                r = sr.Recognizer()
-                with sr.AudioFile(wav_path) as source:
-                    audio_data = r.record(source)
-                source_text = r.recognize_google(audio_data, language=_session_lang)
-                _last_stt = source_text
-                log(f"(STT) {source_text}")
-            except Exception as e:
-                log(f"STT error: {e}")
-                return None
-            # Step 2: send text to Gemini
-            log("Converting to prompt (Gemini Lite)...")
-            body = adapter.build_text_request(GEMINI_SYSTEM_PROMPT, source_text)
-
-        else:  # audio_prompt — send WAV directly to Gemini
-            log("Converting voice to prompt (Gemini Flash)...")
-            with open(wav_path, "rb") as f:
-                audio_b64 = base64.b64encode(f.read()).decode("utf-8")
-            body = adapter.build_audio_request(GEMINI_SYSTEM_PROMPT, audio_b64)
-
+        with open(wav_path, "rb") as f:
+            audio_b64 = base64.b64encode(f.read()).decode("utf-8")
         resp = requests.post(
-            adapter.get_url(cfg["model"], GEMINI_API_KEY),
+            adapter.get_url(GEMINI_FLASH_MODEL, GEMINI_API_KEY),
             headers=adapter.get_headers(),
-            json=body,
+            json=adapter.build_audio_request(GEMINI_SYSTEM_PROMPT, audio_b64),
             timeout=30,
         )
         if resp.status_code == 200:
-            text = adapter.parse_response(resp.json())
-            if text:
-                log(f">> {text}")
-                return text
+            result = adapter.parse_response(resp.json())
+            if result:
+                log(f">> {result}")
+                return result
             log("Gemini: empty response")
             return None
         log(f"Gemini error {resp.status_code}: {resp.text[:120]}")
         return None
-
     except Exception as e:
         log(f"Gemini error: {e}")
         return None
@@ -664,7 +678,7 @@ def type_text(text):
 def on_hotkey_press():
     global _session_lang
     _session_lang = active_language()
-    if ENGINE == "google-ext":
+    if STT_ENGINE == "google-ext" and PROMPT_MODE != "gemini-flash":
         if not _ws_clients:
             log("[Google-ext] Extension not connected")
             return
@@ -677,26 +691,32 @@ def on_hotkey_press():
 
 
 def on_hotkey_release():
-    if ENGINE == "google-ext":
-        text = _transcribe_google_ext()
-    elif ENGINE == "google":
+    global _last_stt
+    _last_stt = None
+
+    if PROMPT_MODE == "gemini-flash":
+        # Bypass STT entirely — send audio straight to Gemini Flash
         path = _stop_recording()
-        text = _transcribe_google_direct(path) if path else None
-    elif ENGINE == "google-cloud":
+        text = _gemini_flash_prompt(path) if path else None
+    elif STT_ENGINE == "google-ext":
+        raw  = _transcribe_google_ext()
+        text = _gemini_lite_prompt(raw) if (raw and PROMPT_MODE == "gemini-lite") else raw
+    else:
         path = _stop_recording()
-        text = _transcribe_google_cloud(path) if path else None
-    elif ENGINE in ("gemini-lite", "gemini-flash"):
-        path = _stop_recording()
-        text = _transcribe_gemini(path) if path else None
-    else:  # groq
-        path = _stop_recording()
-        text = _transcribe_groq(path) if path else None
+        if STT_ENGINE == "google":
+            raw = _transcribe_google_direct(path) if path else None
+        elif STT_ENGINE == "google-cloud":
+            raw = _transcribe_google_cloud(path) if path else None
+        else:  # groq
+            raw = _transcribe_groq(path) if path else None
+        text = _gemini_lite_prompt(raw) if (raw and PROMPT_MODE == "gemini-lite") else raw
 
     if text:
+        engine_label = STT_ENGINE if PROMPT_MODE == "off" else f"{STT_ENGINE}+{PROMPT_MODE}"
         _history.appendleft({
             "time":   datetime.datetime.now().strftime("%H:%M:%S"),
-            "engine": ENGINE,
-            "stt":    _last_stt,   # None for all engines except gemini-lite
+            "engine": engine_label,
+            "stt":    _last_stt,
             "output": text,
         })
         type_text(text)
@@ -724,13 +744,14 @@ def keyboard_listener():
 # ─── Settings Window ──────────────────────────────────────────────────────────
 
 def _apply_settings(new_cfg):
-    global ENGINE, HOTKEY, LANGUAGE, MIC_MODE, GROQ_API_KEY, MODEL, WS_PORT, CHECK_UPDATES
+    global STT_ENGINE, PROMPT_MODE, HOTKEY, LANGUAGE, MIC_MODE, GROQ_API_KEY, MODEL, WS_PORT, CHECK_UPDATES
     global GEMINI_API_KEY, GEMINI_SYSTEM_PROMPT, LANG_MODE
 
     old_mic    = MIC_MODE
-    old_engine = ENGINE
+    old_engine = STT_ENGINE
 
-    ENGINE               = new_cfg["engine"]
+    STT_ENGINE           = new_cfg["stt_engine"]
+    PROMPT_MODE          = new_cfg["prompt_mode"]
     HOTKEY               = new_cfg["hotkey"]
     LANGUAGE             = new_cfg["language"]
     GROQ_API_KEY         = new_cfg["groq_api_key"]
@@ -757,9 +778,9 @@ def _apply_settings(new_cfg):
                 pass
 
     save_settings(new_cfg)
-    log(f"Settings saved — engine={ENGINE}, mic={MIC_MODE}, lang={LANGUAGE}")
+    log(f"Settings saved — stt={STT_ENGINE}, prompt={PROMPT_MODE}, mic={MIC_MODE}")
 
-    if old_engine != ENGINE:
+    if old_engine != STT_ENGINE:
         log("Engine changed — restart SpeakPaste to fully apply")
 
 
@@ -789,32 +810,32 @@ def open_settings(icon=None, item=None):
             tk.Label(win, text=text, **hdr_style).pack(anchor="w", pady=(12, 2))
             ttk.Separator(win).pack(fill="x", pady=(0, 6))
 
-        # ── Engine ──────────────────────────────────────────────────────────
-        section("Engine")
-        engine_var = tk.StringVar(value=ENGINE)
         rb_cfg = dict(bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
                       activebackground="#1e1e1e", activeforeground="#ffffff",
                       font=("Segoe UI", 9))
-        for label, val in [
-                ("Google  —  free, unofficial, no key",          "google"),
-                ("Google Cloud  —  official, API key required",  "google-cloud"),
-                ("Groq Whisper  —  API key required",            "groq"),
-                ("Google Extension  —  Chrome in background",    "google-ext")]:
-            tk.Radiobutton(win, text=label, variable=engine_var, value=val,
-                           **rb_cfg).pack(anchor="w")
-        tk.Frame(win, bg="#333333", height=1).pack(fill="x", pady=(6, 4), padx=4)
-        for label, val in [
-                ("Gemini Flash Lite  —  transcribe \u2192 prompt", "gemini-lite"),
-                ("Gemini Flash  —  voice \u2192 prompt directly",  "gemini-flash")]:
-            tk.Radiobutton(win, text=label, variable=engine_var, value=val,
-                           **rb_cfg).pack(anchor="w")
 
-        # ── Inline engine config (fixed-height slot below radio buttons) ────
-        engine_extra = tk.Frame(win, bg="#1e1e1e")
-        engine_extra.pack(fill="x")
+        # ── Transcription Engine ─────────────────────────────────────────────
+        section("Transcription Engine")
+        stt_var = tk.StringVar(value=STT_ENGINE)
+
+        stt_section = tk.Frame(win, bg="#1e1e1e")
+        stt_section.pack(fill="x")
+
+        stt_radios = []
+        for label, val in [
+                ("Google  —  free, unofficial, no key",         "google"),
+                ("Google Cloud  —  official, API key required", "google-cloud"),
+                ("Groq Whisper  —  API key required",           "groq"),
+                ("Google Extension  —  Chrome in background",   "google-ext")]:
+            rb = tk.Radiobutton(stt_section, text=label, variable=stt_var, value=val, **rb_cfg)
+            rb.pack(anchor="w")
+            stt_radios.append(rb)
+
+        stt_extra = tk.Frame(stt_section, bg="#1e1e1e")
+        stt_extra.pack(fill="x")
 
         # Groq sub-frame
-        groq_frame = tk.Frame(engine_extra, bg="#252525", padx=12, pady=6)
+        groq_frame = tk.Frame(stt_extra, bg="#252525", padx=12, pady=6)
         row3 = tk.Frame(groq_frame, bg="#252525")
         row3.pack(fill="x", pady=2)
         tk.Label(row3, text="API Key:", width=14, anchor="w",
@@ -822,7 +843,6 @@ def open_settings(icon=None, item=None):
         key_var = tk.StringVar(value=GROQ_API_KEY)
         tk.Entry(row3, textvariable=key_var, width=34, show="*",
                  **{**ent_style, "bg": "#333333"}).pack(side="left")
-
         row4 = tk.Frame(groq_frame, bg="#252525")
         row4.pack(fill="x", pady=2)
         tk.Label(row4, text="Model:", width=14, anchor="w",
@@ -832,7 +852,7 @@ def open_settings(icon=None, item=None):
                  **{**ent_style, "bg": "#333333"}).pack(side="left")
 
         # Google Cloud sub-frame
-        gcloud_frame = tk.Frame(engine_extra, bg="#252525", padx=12, pady=6)
+        gcloud_frame = tk.Frame(stt_extra, bg="#252525", padx=12, pady=6)
         row5 = tk.Frame(gcloud_frame, bg="#252525")
         row5.pack(fill="x", pady=2)
         tk.Label(row5, text="API Key:", width=14, anchor="w",
@@ -844,8 +864,38 @@ def open_settings(icon=None, item=None):
                  text="console.cloud.google.com → Speech-to-Text API → Credentials",
                  bg="#252525", fg="#666666", font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
 
-        # Gemini sub-frame (shared for gemini-lite and gemini-flash)
-        gemini_frame = tk.Frame(engine_extra, bg="#252525", padx=12, pady=8)
+        def _refresh_stt_extra(*_):
+            eng = stt_var.get()
+            for child in stt_extra.winfo_children():
+                child.pack_forget()
+            if eng == "groq":
+                stt_extra.configure(bg="#252525")
+                groq_frame.pack(fill="x")
+            elif eng == "google-cloud":
+                stt_extra.configure(bg="#252525")
+                gcloud_frame.pack(fill="x")
+            else:
+                stt_extra.configure(bg="#1e1e1e")
+
+        stt_var.trace_add("write", _refresh_stt_extra)
+        _refresh_stt_extra()
+
+        # ── Prompt ───────────────────────────────────────────────────────────
+        section("Prompt")
+        prompt_var = tk.StringVar(value=PROMPT_MODE)
+
+        for label, val in [
+                ("Off  —  paste raw transcript",                                     "off"),
+                ("Gemini Flash Lite  —  transcript \u2192 prompt",                   "gemini-lite"),
+                ("Gemini Flash  —  voice \u2192 prompt directly  (skips engine above)", "gemini-flash")]:
+            tk.Radiobutton(win, text=label, variable=prompt_var, value=val,
+                           **rb_cfg).pack(anchor="w")
+
+        prompt_extra = tk.Frame(win, bg="#1e1e1e")
+        prompt_extra.pack(fill="x")
+
+        # Gemini config (API key + system prompt) — shared for both gemini modes
+        gemini_frame = tk.Frame(prompt_extra, bg="#252525", padx=12, pady=8)
 
         row_gk = tk.Frame(gemini_frame, bg="#252525")
         row_gk.pack(fill="x", pady=2)
@@ -881,24 +931,25 @@ def open_settings(icon=None, item=None):
                   bg="#3c3c3c", fg="#888888", relief="flat", font=("Segoe UI", 8),
                   activebackground="#4c4c4c", activeforeground="#cccccc").pack(anchor="e", pady=(4, 0))
 
-        def _refresh_visibility(*_):
-            eng = engine_var.get()
-            for child in engine_extra.winfo_children():
+        def _refresh_prompt(*_):
+            mode = prompt_var.get()
+            # Show/hide Gemini config
+            for child in prompt_extra.winfo_children():
                 child.pack_forget()
-            if eng == "groq":
-                engine_extra.configure(bg="#252525")
-                groq_frame.pack(fill="x")
-            elif eng == "google-cloud":
-                engine_extra.configure(bg="#252525")
-                gcloud_frame.pack(fill="x")
-            elif eng in ("gemini-lite", "gemini-flash"):
-                engine_extra.configure(bg="#252525")
+            if mode in ("gemini-lite", "gemini-flash"):
+                prompt_extra.configure(bg="#252525")
                 gemini_frame.pack(fill="x")
             else:
-                engine_extra.configure(bg="#1e1e1e")
+                prompt_extra.configure(bg="#1e1e1e")
+            # Visually mute STT section when gemini-flash bypasses it
+            # Note: intentionally NOT using state="disabled" — causes visual glitch on Windows dark theme
+            fg = "#555555" if mode == "gemini-flash" else "#cccccc"
+            for rb in stt_radios:
+                rb.config(fg=fg)
+            _refresh_stt_extra()
 
-        engine_var.trace_add("write", _refresh_visibility)
-        _refresh_visibility()
+        prompt_var.trace_add("write", _refresh_prompt)
+        _refresh_prompt()
 
         # ── Hotkey & Language ────────────────────────────────────────────────
         section("General")
@@ -960,7 +1011,8 @@ def open_settings(icon=None, item=None):
 
         def on_save():
             new_cfg = {
-                "engine":               engine_var.get(),
+                "stt_engine":           stt_var.get(),
+                "prompt_mode":          prompt_var.get(),
                 "hotkey":               hotkey_var.get().strip(),
                 "language":             lang_var.get().strip(),
                 "lang_mode":            "keyboard" if lang_mode_var.get() else "fixed",
@@ -1189,8 +1241,9 @@ def _toggle_mic_mode(icon, item):
 
 def setup_tray():
     global tray_icon
+    _tray_label = STT_ENGINE.upper() if PROMPT_MODE == "off" else f"{STT_ENGINE.upper()}+{PROMPT_MODE.upper()}"
     menu = pystray.Menu(
-        pystray.MenuItem(f"Engine: {ENGINE.upper()}", None, enabled=False),
+        pystray.MenuItem(f"Engine: {_tray_label}", None, enabled=False),
         pystray.MenuItem(_last_log, None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Settings...", open_settings),
@@ -1206,7 +1259,7 @@ def setup_tray():
     tray_icon = pystray.Icon(
         "speakpaste",
         create_icon("idle"),
-        f"SpeakPaste [{ENGINE.upper()}]\n{HOTKEY.upper()} to record",
+        f"SpeakPaste [{_tray_label}]\n{HOTKEY.upper()} to record",
         menu,
     )
     return tray_icon
@@ -1217,30 +1270,33 @@ def setup_tray():
 def main():
     global audio_stream, running
 
-    if ENGINE in ("groq", "google", "google-cloud", "gemini-lite", "gemini-flash"):
-        if ENGINE == "groq" and not GROQ_API_KEY:
+    _label = STT_ENGINE.upper() if PROMPT_MODE == "off" else f"{STT_ENGINE.upper()}+{PROMPT_MODE.upper()}"
+
+    needs_audio = not (STT_ENGINE == "google-ext" and PROMPT_MODE != "gemini-flash")
+    if needs_audio:
+        if STT_ENGINE == "groq" and not GROQ_API_KEY:
             log("WARNING: GROQ_API_KEY not set — open Settings to configure")
-        if ENGINE == "google-cloud" and not GOOGLE_CLOUD_API_KEY:
+        if STT_ENGINE == "google-cloud" and not GOOGLE_CLOUD_API_KEY:
             log("WARNING: GOOGLE_CLOUD_API_KEY not set — open Settings to configure")
-        if ENGINE in ("gemini-lite", "gemini-flash") and not GEMINI_API_KEY:
+        if PROMPT_MODE in ("gemini-lite", "gemini-flash") and not GEMINI_API_KEY:
             log("WARNING: GEMINI_API_KEY not set — open Settings to configure")
         import sounddevice as sd
         audio_stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS,
                                       callback=_audio_callback)
         if MIC_MODE == "always":
             audio_stream.start()
-            log(f"SpeakPaste [{ENGINE.upper()}] ready — {HOTKEY.upper()} (mic always-on)")
+            log(f"SpeakPaste [{_label}] ready — {HOTKEY.upper()} (mic always-on)")
         else:
-            log(f"SpeakPaste [{ENGINE.upper()}] ready — {HOTKEY.upper()} (mic on-demand)")
+            log(f"SpeakPaste [{_label}] ready — {HOTKEY.upper()} (mic on-demand)")
 
-    elif ENGINE == "google-ext":
+    elif STT_ENGINE == "google-ext":
         ws_thread = threading.Thread(target=_start_ws_server, daemon=True)
         ws_thread.start()
         time.sleep(0.2)
         log(f"SpeakPaste [GOOGLE-EXT] ready — load Chrome extension to connect")
 
     else:
-        log(f"Unknown engine '{ENGINE}' — open Settings to fix")
+        log("Unknown configuration — open Settings to fix")
 
     kb_thread = threading.Thread(target=keyboard_listener, daemon=True)
     kb_thread.start()
