@@ -45,7 +45,7 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VERSION       = "1.7.0"
+VERSION       = "1.8.0"
 GITHUB_REPO   = "mohammad-rj/speakpaste"
 GITHUB_URL    = f"https://github.com/{GITHUB_REPO}"
 
@@ -71,19 +71,21 @@ GEMINI_DEFAULT_SYSTEM_PROMPT = (
 )
 
 _DEFAULTS = {
-    "stt_engine":           "google",
-    "prompt_mode":          "off",
-    "hotkey":               "win+alt",
-    "language":             "fa",
-    "mic_mode":             "always",
-    "groq_api_key":         "",
-    "model":                "whisper-large-v3-turbo",
-    "google_cloud_api_key": "",
-    "ws_port":              9137,
-    "check_updates":        True,
-    "gemini_api_key":       "",
-    "gemini_system_prompt": GEMINI_DEFAULT_SYSTEM_PROMPT,
-    "lang_mode":            "fixed",
+    "stt_engine":                "google",
+    "prompt_mode":               "off",
+    "hotkey":                    "win+alt",
+    "language":                  "fa",
+    "mic_mode":                  "always",
+    "groq_api_key":              "",
+    "model":                     "whisper-large-v3-turbo",
+    "google_cloud_api_key":      "",
+    "ws_port":                   9137,
+    "check_updates":             True,
+    "gemini_api_key":            "",
+    "gemini_system_prompt":      GEMINI_DEFAULT_SYSTEM_PROMPT,
+    "lang_mode":                 "fixed",
+    "gemini_thinking_level":     "LOW",
+    "gemini_media_resolution":   "LOW",
 }
 
 # ─── Settings Load / Save ─────────────────────────────────────────────────────
@@ -151,9 +153,11 @@ MODEL                = _cfg["model"]
 GOOGLE_CLOUD_API_KEY = _cfg["google_cloud_api_key"]
 WS_PORT              = _cfg["ws_port"]
 CHECK_UPDATES        = _cfg["check_updates"]
-GEMINI_API_KEY       = _cfg.get("gemini_api_key", "")
-GEMINI_SYSTEM_PROMPT = _cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYSTEM_PROMPT)
-LANG_MODE            = _cfg.get("lang_mode", "fixed")
+GEMINI_API_KEY            = _cfg.get("gemini_api_key", "")
+GEMINI_SYSTEM_PROMPT      = _cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYSTEM_PROMPT)
+LANG_MODE                 = _cfg.get("lang_mode", "fixed")
+GEMINI_THINKING_LEVEL     = _cfg.get("gemini_thinking_level", "LOW")
+GEMINI_MEDIA_RESOLUTION   = _cfg.get("gemini_media_resolution", "LOW")
 
 _session_lang    = LANGUAGE  # language captured at hotkey press time
 _last_stt        = None      # intermediate STT text captured inside _transcribe_gemini
@@ -250,9 +254,19 @@ class INPUT(ctypes.Structure):
 
 # ─── Logging / Tray Icon ──────────────────────────────────────────────────────
 
+_log_last_t = [None]  # [timestamp of last log] for elapsed calculation
+
 def log(msg):
-    print(msg)
-    logs.append(msg)
+    now  = time.time()
+    dt   = datetime.datetime.now()
+    ts   = dt.strftime("%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+    if _log_last_t[0] is not None:
+        line = f"[{ts}] +{now - _log_last_t[0]:.2f}s  {msg}"
+    else:
+        line = f"[{ts}]  {msg}"
+    _log_last_t[0] = now
+    print(line)
+    logs.append(line)
     if tray_icon:
         recent = list(logs)[-3:]
         tray_icon.title = ("SpeakPaste\n" + "\n".join(l[:40] for l in recent))[:127]
@@ -355,6 +369,11 @@ def _stop_recording():
 GEMINI_LITE_MODEL  = "gemini-3.1-flash-lite-preview"
 GEMINI_FLASH_MODEL = "gemini-3-flash-preview"
 
+_THINKING_BUDGETS = {"MINIMAL": 512, "LOW": 1024, "MEDIUM": 4096, "HIGH": 8192}
+
+def _thinking_budget(level):
+    return _THINKING_BUDGETS.get(level.upper(), 1024)
+
 
 class GeminiAdapter:
     """Adapter for Google Gemini REST API (generateContent endpoint)."""
@@ -366,19 +385,27 @@ class GeminiAdapter:
     def get_headers(self):
         return {"Content-Type": "application/json"}
 
-    def build_text_request(self, system_prompt, text):
+    def build_text_request(self, system_prompt, text, thinking_level="LOW", media_resolution="LOW"):
         return {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"parts": [{"text": text}]}],
+            "generationConfig": {
+                "thinkingConfig":  {"thinkingBudget": _thinking_budget(thinking_level)},
+                "mediaResolution": f"MEDIA_RESOLUTION_{media_resolution}",
+            },
         }
 
-    def build_audio_request(self, system_prompt, audio_b64):
+    def build_audio_request(self, system_prompt, audio_b64, thinking_level="LOW", media_resolution="LOW"):
         return {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"parts": [
                 {"inlineData": {"mimeType": "audio/wav", "data": audio_b64}},
                 {"text": "Convert this voice recording into a professional English programming prompt."},
             ]}],
+            "generationConfig": {
+                "thinkingConfig":  {"thinkingBudget": _thinking_budget(thinking_level)},
+                "mediaResolution": f"MEDIA_RESOLUTION_{media_resolution}",
+            },
         }
 
     def parse_response(self, data):
@@ -500,7 +527,8 @@ def _gemini_lite_prompt(text):
         resp = requests.post(
             adapter.get_url(GEMINI_LITE_MODEL, GEMINI_API_KEY),
             headers=adapter.get_headers(),
-            json=adapter.build_text_request(GEMINI_SYSTEM_PROMPT, text),
+            json=adapter.build_text_request(GEMINI_SYSTEM_PROMPT, text,
+                                            GEMINI_THINKING_LEVEL, GEMINI_MEDIA_RESOLUTION),
             timeout=30,
         )
         if resp.status_code == 200:
@@ -535,7 +563,8 @@ def _gemini_flash_prompt(wav_path):
         resp = requests.post(
             adapter.get_url(GEMINI_FLASH_MODEL, GEMINI_API_KEY),
             headers=adapter.get_headers(),
-            json=adapter.build_audio_request(GEMINI_SYSTEM_PROMPT, audio_b64),
+            json=adapter.build_audio_request(GEMINI_SYSTEM_PROMPT, audio_b64,
+                                             GEMINI_THINKING_LEVEL, GEMINI_MEDIA_RESOLUTION),
             timeout=30,
         )
         if resp.status_code == 200:
@@ -677,6 +706,7 @@ def type_text(text):
 
 def on_hotkey_press():
     global _session_lang
+    _log_last_t[0] = None  # reset elapsed timer at start of each invocation
     _session_lang = active_language()
     if STT_ENGINE == "google-ext" and PROMPT_MODE != "gemini-flash":
         if not _ws_clients:
@@ -745,24 +775,26 @@ def keyboard_listener():
 
 def _apply_settings(new_cfg):
     global STT_ENGINE, PROMPT_MODE, HOTKEY, LANGUAGE, MIC_MODE, GROQ_API_KEY, MODEL, WS_PORT, CHECK_UPDATES
-    global GEMINI_API_KEY, GEMINI_SYSTEM_PROMPT, LANG_MODE
+    global GEMINI_API_KEY, GEMINI_SYSTEM_PROMPT, LANG_MODE, GEMINI_THINKING_LEVEL, GEMINI_MEDIA_RESOLUTION
 
     old_mic    = MIC_MODE
     old_engine = STT_ENGINE
 
-    STT_ENGINE           = new_cfg["stt_engine"]
-    PROMPT_MODE          = new_cfg["prompt_mode"]
-    HOTKEY               = new_cfg["hotkey"]
-    LANGUAGE             = new_cfg["language"]
-    GROQ_API_KEY         = new_cfg["groq_api_key"]
-    MODEL                = new_cfg["model"]
-    GOOGLE_CLOUD_API_KEY = new_cfg["google_cloud_api_key"]
-    WS_PORT              = new_cfg["ws_port"]
-    MIC_MODE             = new_cfg["mic_mode"]
-    CHECK_UPDATES        = new_cfg["check_updates"]
-    GEMINI_API_KEY       = new_cfg.get("gemini_api_key", "")
-    GEMINI_SYSTEM_PROMPT = new_cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYSTEM_PROMPT)
-    LANG_MODE            = new_cfg.get("lang_mode", "fixed")
+    STT_ENGINE              = new_cfg["stt_engine"]
+    PROMPT_MODE             = new_cfg["prompt_mode"]
+    HOTKEY                  = new_cfg["hotkey"]
+    LANGUAGE                = new_cfg["language"]
+    GROQ_API_KEY            = new_cfg["groq_api_key"]
+    MODEL                   = new_cfg["model"]
+    GOOGLE_CLOUD_API_KEY    = new_cfg["google_cloud_api_key"]
+    WS_PORT                 = new_cfg["ws_port"]
+    MIC_MODE                = new_cfg["mic_mode"]
+    CHECK_UPDATES           = new_cfg["check_updates"]
+    GEMINI_API_KEY          = new_cfg.get("gemini_api_key", "")
+    GEMINI_SYSTEM_PROMPT    = new_cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYSTEM_PROMPT)
+    LANG_MODE               = new_cfg.get("lang_mode", "fixed")
+    GEMINI_THINKING_LEVEL   = new_cfg.get("gemini_thinking_level", "LOW")
+    GEMINI_MEDIA_RESOLUTION = new_cfg.get("gemini_media_resolution", "LOW")
 
     # Apply mic mode change live
     if audio_stream and old_mic != MIC_MODE:
@@ -798,8 +830,28 @@ def open_settings(icon=None, item=None):
         win = tk.Tk()
         win.withdraw()  # hide until fully built — prevents layout flash
         win.title("SpeakPaste — Settings")
-        win.resizable(False, False)
-        win.configure(padx=20, pady=16, bg="#1e1e1e")
+        win.resizable(False, True)
+        win.configure(bg="#1e1e1e")
+
+        # ── Scrollable body ──────────────────────────────────────────────────
+        canvas = tk.Canvas(win, bg="#1e1e1e", highlightthickness=0, bd=0)
+        scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        body = tk.Frame(canvas, bg="#1e1e1e", padx=20, pady=16)
+        body_id = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfig(body_id, width=canvas.winfo_width())
+        body.bind("<Configure>", _on_body_configure)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(body_id, width=e.width))
+
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        win.bind("<MouseWheel>", _on_mousewheel)
 
         lbl_style = {"bg": "#1e1e1e", "fg": "#cccccc", "font": ("Segoe UI", 9)}
         hdr_style = {"bg": "#1e1e1e", "fg": "#ffffff", "font": ("Segoe UI", 9, "bold")}
@@ -807,8 +859,8 @@ def open_settings(icon=None, item=None):
                      "relief": "flat", "font": ("Segoe UI", 9)}
 
         def section(text):
-            tk.Label(win, text=text, **hdr_style).pack(anchor="w", pady=(12, 2))
-            ttk.Separator(win).pack(fill="x", pady=(0, 6))
+            tk.Label(body, text=text, **hdr_style).pack(anchor="w", pady=(12, 2))
+            ttk.Separator(body).pack(fill="x", pady=(0, 6))
 
         rb_cfg = dict(bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
                       activebackground="#1e1e1e", activeforeground="#ffffff",
@@ -818,7 +870,7 @@ def open_settings(icon=None, item=None):
         section("Transcription Engine")
         stt_var = tk.StringVar(value=STT_ENGINE)
 
-        stt_section = tk.Frame(win, bg="#1e1e1e")
+        stt_section = tk.Frame(body, bg="#1e1e1e")
         stt_section.pack(fill="x")
 
         stt_radios = []
@@ -888,10 +940,10 @@ def open_settings(icon=None, item=None):
                 ("Off  —  paste raw transcript",                                     "off"),
                 ("Gemini Flash Lite  —  transcript \u2192 prompt",                   "gemini-lite"),
                 ("Gemini Flash  —  voice \u2192 prompt directly  (skips engine above)", "gemini-flash")]:
-            tk.Radiobutton(win, text=label, variable=prompt_var, value=val,
+            tk.Radiobutton(body, text=label, variable=prompt_var, value=val,
                            **rb_cfg).pack(anchor="w")
 
-        prompt_extra = tk.Frame(win, bg="#1e1e1e")
+        prompt_extra = tk.Frame(body, bg="#1e1e1e")
         prompt_extra.pack(fill="x")
 
         # Gemini config (API key + system prompt) — shared for both gemini modes
@@ -931,6 +983,36 @@ def open_settings(icon=None, item=None):
                   bg="#3c3c3c", fg="#888888", relief="flat", font=("Segoe UI", 8),
                   activebackground="#4c4c4c", activeforeground="#cccccc").pack(anchor="e", pady=(4, 0))
 
+        # Quality settings — thinking level + media resolution
+        quality_frame = tk.Frame(gemini_frame, bg="#252525")
+        quality_frame.pack(fill="x", pady=(8, 0))
+
+        row_think = tk.Frame(quality_frame, bg="#252525")
+        row_think.pack(fill="x", pady=2)
+        tk.Label(row_think, text="Thinking level:", width=16, anchor="w",
+                 bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(side="left")
+        thinking_var = tk.StringVar(value=GEMINI_THINKING_LEVEL)
+        om_think = tk.OptionMenu(row_think, thinking_var, "MINIMAL", "LOW", "MEDIUM", "HIGH")
+        om_think.config(bg="#333333", fg="#cccccc", activebackground="#444444",
+                        activeforeground="#ffffff", highlightthickness=0,
+                        relief="flat", font=("Segoe UI", 9))
+        om_think["menu"].config(bg="#333333", fg="#cccccc",
+                                activebackground="#0078d4", activeforeground="#ffffff")
+        om_think.pack(side="left")
+
+        row_res = tk.Frame(quality_frame, bg="#252525")
+        row_res.pack(fill="x", pady=2)
+        tk.Label(row_res, text="Media resolution:", width=16, anchor="w",
+                 bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(side="left")
+        media_res_var = tk.StringVar(value=GEMINI_MEDIA_RESOLUTION)
+        om_res = tk.OptionMenu(row_res, media_res_var, "LOW", "MEDIUM", "HIGH")
+        om_res.config(bg="#333333", fg="#cccccc", activebackground="#444444",
+                      activeforeground="#ffffff", highlightthickness=0,
+                      relief="flat", font=("Segoe UI", 9))
+        om_res["menu"].config(bg="#333333", fg="#cccccc",
+                              activebackground="#0078d4", activeforeground="#ffffff")
+        om_res.pack(side="left")
+
         def _refresh_prompt(*_):
             mode = prompt_var.get()
             # Show/hide Gemini config
@@ -954,13 +1036,13 @@ def open_settings(icon=None, item=None):
         # ── Hotkey & Language ────────────────────────────────────────────────
         section("General")
 
-        row1 = tk.Frame(win, bg="#1e1e1e")
+        row1 = tk.Frame(body, bg="#1e1e1e")
         row1.pack(fill="x", pady=2)
         tk.Label(row1, text="Hotkey:", width=12, anchor="w", **lbl_style).pack(side="left")
         hotkey_var = tk.StringVar(value=HOTKEY)
         tk.Entry(row1, textvariable=hotkey_var, width=20, **ent_style).pack(side="left")
 
-        row2 = tk.Frame(win, bg="#1e1e1e")
+        row2 = tk.Frame(body, bg="#1e1e1e")
         row2.pack(fill="x", pady=2)
         tk.Label(row2, text="Language:", width=12, anchor="w", **lbl_style).pack(side="left")
         lang_var = tk.StringVar(value=LANGUAGE)
@@ -975,7 +1057,7 @@ def open_settings(icon=None, item=None):
             else:
                 lang_entry.config(state="normal")
 
-        tk.Checkbutton(win, text="Follow Windows keyboard layout  (auto-detect Persian / English)",
+        tk.Checkbutton(body, text="Follow Windows keyboard layout  (auto-detect Persian / English)",
                        variable=lang_mode_var, command=_toggle_lang_mode,
                        bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
                        activebackground="#1e1e1e", activeforeground="#ffffff",
@@ -985,29 +1067,29 @@ def open_settings(icon=None, item=None):
         # ── Microphone ──────────────────────────────────────────────────────
         section("Microphone")
         mic_var = tk.StringVar(value=MIC_MODE)
-        tk.Radiobutton(win, text="Always on  (pre-roll active, mic indicator always visible)",
+        tk.Radiobutton(body, text="Always on  (pre-roll active, mic indicator always visible)",
                        variable=mic_var, value="always",
                        bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
                        activebackground="#1e1e1e", activeforeground="#ffffff",
                        font=("Segoe UI", 9)).pack(anchor="w")
-        tk.Radiobutton(win, text="On demand  (mic opens only while hotkey held — more secure)",
+        tk.Radiobutton(body, text="On demand  (mic opens only while hotkey held — more secure)",
                        variable=mic_var, value="on_demand",
                        bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
                        activebackground="#1e1e1e", activeforeground="#ffffff",
                        font=("Segoe UI", 9)).pack(anchor="w")
 
-        # ── Buttons ──────────────────────────────────────────────────────────
-        btn_frame = tk.Frame(win, bg="#1e1e1e")
-        btn_frame.pack(fill="x", pady=(18, 0))
-
         # ── General options ──────────────────────────────────────────────────
         section("Options")
         updates_var = tk.BooleanVar(value=CHECK_UPDATES)
-        tk.Checkbutton(win, text="Check for updates on startup",
+        tk.Checkbutton(body, text="Check for updates on startup",
                        variable=updates_var,
                        bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
                        activebackground="#1e1e1e", activeforeground="#ffffff",
                        font=("Segoe UI", 9)).pack(anchor="w")
+
+        # ── Buttons ──────────────────────────────────────────────────────────
+        btn_frame = tk.Frame(body, bg="#1e1e1e")
+        btn_frame.pack(fill="x", pady=(18, 0))
 
         def on_save():
             new_cfg = {
@@ -1022,8 +1104,10 @@ def open_settings(icon=None, item=None):
                 "google_cloud_api_key": gcloud_key_var.get().strip(),
                 "ws_port":              WS_PORT,
                 "check_updates":        updates_var.get(),
-                "gemini_api_key":       gemini_key_var.get().strip(),
-                "gemini_system_prompt": gemini_prompt_text.get("1.0", "end-1c").strip(),
+                "gemini_api_key":           gemini_key_var.get().strip(),
+                "gemini_system_prompt":     gemini_prompt_text.get("1.0", "end-1c").strip(),
+                "gemini_thinking_level":    thinking_var.get(),
+                "gemini_media_resolution":  media_res_var.get(),
             }
             _apply_settings(new_cfg)
             win.destroy()
@@ -1038,9 +1122,9 @@ def open_settings(icon=None, item=None):
                   activebackground="#4c4c4c", activeforeground="white").pack(side="right")
 
         # ── Footer ───────────────────────────────────────────────────────────
-        ttk.Separator(win).pack(fill="x", pady=(16, 6))
-        footer = tk.Frame(win, bg="#1e1e1e")
-        footer.pack(fill="x")
+        ttk.Separator(body).pack(fill="x", pady=(16, 6))
+        footer = tk.Frame(body, bg="#1e1e1e")
+        footer.pack(fill="x", pady=(0, 8))
         tk.Label(footer, text=f"SpeakPaste v{VERSION}",
                  bg="#1e1e1e", fg="#555555", font=("Segoe UI", 8)).pack(side="left")
         link = tk.Label(footer, text="View on GitHub ↗",
@@ -1051,12 +1135,12 @@ def open_settings(icon=None, item=None):
 
         _settings_window = win
         win.update_idletasks()  # force layout calculation
-        # center on screen
-        w = win.winfo_reqwidth()
-        h = win.winfo_reqheight()
+        # size and center: cap height at 90% of screen
         sw = win.winfo_screenwidth()
         sh = win.winfo_screenheight()
-        win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+        w  = body.winfo_reqwidth() + scrollbar.winfo_reqwidth() + 4
+        h  = min(body.winfo_reqheight() + 8, int(sh * 0.90))
+        win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
         win.deiconify()  # now show
         win.mainloop()
         _settings_window = None

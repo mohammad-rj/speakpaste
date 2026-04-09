@@ -54,6 +54,9 @@ python speakpaste.py
 All configuration is done via the built-in **Settings window** (tray → Settings):
 
 - **Engine** — pick your STT backend; API key field expands inline when needed
+- **Prompt** — off (raw transcript), `gemini-lite` (transcript → prompt), or `gemini-flash` (voice → prompt directly)
+  - **Thinking level** — Minimal / Low / Medium / High (default: Low)
+  - **Media resolution** — Low / Medium / High (default: Low)
 - **Hotkey** — default `win+alt`, change to anything
 - **Language** — e.g. `fa`, `en`, `ar` (or full BCP-47 like `fa-IR`)
 - **Follow Windows keyboard layout** — when checked, language is detected automatically from your active keyboard layout at the moment you press the hotkey; no manual switching needed (see below)
@@ -122,11 +125,13 @@ History is in-memory only and resets when SpeakPaste is restarted.
 - Speak in any language — output is always a clean English prompt for your AI coding assistant
 - Get a free key: [aistudio.google.com](https://aistudio.google.com) → Get API key
 - System prompt is fully customizable in Settings
+- **Thinking level** and **media resolution** configurable in Settings (default: Low for both — minimum latency)
 
 **`gemini-flash`**
 - Records audio → sends WAV directly to [Gemini Flash](https://aistudio.google.com) (multimodal) → English programming prompt
 - Skips the STT step entirely — Gemini understands voice directly
 - Same Gemini API key as `gemini-lite`; configurable system prompt
+- **Thinking level** and **media resolution** configurable in Settings (default: Low for both — minimum latency)
 
 ---
 
