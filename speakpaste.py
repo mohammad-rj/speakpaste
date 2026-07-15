@@ -45,11 +45,13 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VERSION       = "1.8.0"
+VERSION       = "1.9.0"
 GITHUB_REPO   = "mohammad-rj/speakpaste"
 GITHUB_URL    = f"https://github.com/{GITHUB_REPO}"
 
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.json')
+HISTORY_FILE  = os.path.join(APP_DIR, 'history.json')
+HISTORY_MAX   = 50
 GROQ_API_URL  = "https://api.groq.com/openai/v1/audio/transcriptions"
 SAMPLE_RATE   = 16000
 CHANNELS      = 1
@@ -139,6 +141,32 @@ def save_settings(cfg):
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
 
+# ─── History persistence ──────────────────────────────────────────────────────
+
+def load_history():
+    """Load saved history entries (newest first) into a bounded deque."""
+    try:
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return deque(data, maxlen=HISTORY_MAX)
+    except Exception:
+        pass
+    return deque(maxlen=HISTORY_MAX)
+
+
+def save_history():
+    """Persist the in-memory history to disk atomically (newest first)."""
+    try:
+        tmp = HISTORY_FILE + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(list(_history), f, ensure_ascii=False)
+        os.replace(tmp, HISTORY_FILE)
+    except Exception as e:
+        log(f"History save error: {e}")
+
+
 # ─── Config (mutable globals) ─────────────────────────────────────────────────
 
 _cfg = load_settings()
@@ -161,7 +189,7 @@ GEMINI_MEDIA_RESOLUTION   = _cfg.get("gemini_media_resolution", "LOW")
 
 _session_lang    = LANGUAGE  # language captured at hotkey press time
 _last_stt        = None      # intermediate STT text captured inside _transcribe_gemini
-_history         = deque(maxlen=50)
+_history         = load_history()  # persisted across restarts (newest first)
 _history_window  = None
 
 # ─── State ────────────────────────────────────────────────────────────────────
@@ -182,6 +210,15 @@ _ws_clients = set()
 _result_q   = Queue()
 
 _settings_window = None  # only one open at a time
+
+# Single persistent hidden Tk root on ONE dedicated thread. All windows are
+# Toplevels of this root and every Tk touch is marshalled onto its thread via
+# _ui_run(). Tkinter is not thread-safe: the old code created a fresh tk.Tk()
+# root + its own mainloop in a new thread on every menu click, and the tray
+# thread poked those roots directly (winfo_exists/lift) — that races the Tcl
+# global lock and intermittently freezes the app / never opens the window.
+_ui_root  = None
+_ui_queue = Queue()  # callables to execute on the Tk thread
 
 # ─── Windows Unicode Typing ───────────────────────────────────────────────────
 
@@ -228,6 +265,19 @@ def active_language():
     if LANG_MODE == "keyboard":
         return get_keyboard_layout_language()
     return LANGUAGE
+
+
+def _is_rtl(s):
+    """True if the string contains any Arabic/Persian (RTL script) character."""
+    for ch in s or "":
+        c = ord(ch)
+        if (0x0600 <= c <= 0x06FF or   # Arabic
+                0x0750 <= c <= 0x077F or   # Arabic Supplement
+                0x08A0 <= c <= 0x08FF or   # Arabic Extended-A
+                0xFB50 <= c <= 0xFDFF or   # Arabic Presentation Forms-A
+                0xFE70 <= c <= 0xFEFF):    # Arabic Presentation Forms-B
+            return True
+    return False
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -749,6 +799,7 @@ def on_hotkey_release():
             "stt":    _last_stt,
             "output": text,
         })
+        save_history()
         type_text(text)
     if tray_icon:
         tray_icon.icon = create_icon("idle")
@@ -771,10 +822,40 @@ def keyboard_listener():
         time.sleep(0.05)
 
 
+# ─── Tk UI thread (single root) ───────────────────────────────────────────────
+
+def _ui_run(fn):
+    """Queue a zero-arg callable to run on the Tk UI thread. Safe from any thread."""
+    _ui_queue.put(fn)
+
+
+def _ui_thread_main():
+    """Owns the one and only Tk root and its mainloop for the whole process."""
+    global _ui_root
+    _ui_root = tk.Tk()
+    _ui_root.withdraw()  # invisible master; real windows are Toplevels
+
+    def _pump():
+        try:
+            while True:
+                fn = _ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception as e:
+                    log(f"UI error: {e}")
+        except Empty:
+            pass
+        _ui_root.after(80, _pump)
+
+    _ui_root.after(80, _pump)
+    _ui_root.mainloop()
+
+
 # ─── Settings Window ──────────────────────────────────────────────────────────
 
 def _apply_settings(new_cfg):
     global STT_ENGINE, PROMPT_MODE, HOTKEY, LANGUAGE, MIC_MODE, GROQ_API_KEY, MODEL, WS_PORT, CHECK_UPDATES
+    global GOOGLE_CLOUD_API_KEY
     global GEMINI_API_KEY, GEMINI_SYSTEM_PROMPT, LANG_MODE, GEMINI_THINKING_LEVEL, GEMINI_MEDIA_RESOLUTION
 
     old_mic    = MIC_MODE
@@ -817,17 +898,15 @@ def _apply_settings(new_cfg):
 
 
 def open_settings(icon=None, item=None):
-    global _settings_window
-
-    if _settings_window and _settings_window.winfo_exists():
-        _settings_window.lift()
-        _settings_window.focus_force()
-        return
-
     def _build():
         global _settings_window
 
-        win = tk.Tk()
+        if _settings_window and _settings_window.winfo_exists():
+            _settings_window.lift()
+            _settings_window.focus_force()
+            return
+
+        win = tk.Toplevel(_ui_root)
         win.withdraw()  # hide until fully built — prevents layout flash
         win.title("SpeakPaste — Settings")
         win.resizable(False, True)
@@ -1134,6 +1213,13 @@ def open_settings(icon=None, item=None):
         link.bind("<Button-1>", lambda e: __import__('webbrowser').open(GITHUB_URL))
 
         _settings_window = win
+
+        def _on_close():
+            global _settings_window
+            _settings_window = None
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
         win.update_idletasks()  # force layout calculation
         # size and center: cap height at 90% of screen
         sw = win.winfo_screenwidth()
@@ -1142,26 +1228,22 @@ def open_settings(icon=None, item=None):
         h  = min(body.winfo_reqheight() + 8, int(sh * 0.90))
         win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
         win.deiconify()  # now show
-        win.mainloop()
-        _settings_window = None
 
-    threading.Thread(target=_build, daemon=True).start()
+    _ui_run(_build)
 
 
 # ─── History Window ──────────────────────────────────────────────────────────
 
 def open_history(icon=None, item=None):
-    global _history_window
-
-    if _history_window and _history_window.winfo_exists():
-        _history_window.lift()
-        _history_window.focus_force()
-        return
-
     def _build():
         global _history_window
 
-        win = tk.Tk()
+        if _history_window and _history_window.winfo_exists():
+            _history_window.lift()
+            _history_window.focus_force()
+            return
+
+        win = tk.Toplevel(_ui_root)
         win.withdraw()
         win.title("SpeakPaste - History")
         win.configure(bg="#1e1e1e")
@@ -1185,12 +1267,19 @@ def open_history(icon=None, item=None):
                 txt.insert("end", entry["time"] + "  ", "ts")
                 txt.insert("end", entry["engine"].upper() + "\n", "eng")
                 if entry.get("stt") and show_stt_var.get():
+                    ln_start = txt.index("end-1c")
                     txt.insert("end", "  Voice   ", "lbl_v")
-                    txt.insert("end", entry["stt"] + "\n", "stt")
+                    txt.insert("end", entry["stt"], "stt")
+                    if _is_rtl(entry["stt"]):
+                        txt.tag_add("rtl", ln_start, txt.index("end-1c"))
+                    txt.insert("end", "\n")
                 lbl = "  Prompt  " if entry.get("stt") else "  "
+                ln_start = txt.index("end-1c")
                 txt.insert("end", lbl, "lbl_p")
-                txt.insert("end", entry["output"] + "\n", "out")
-                txt.insert("end", "\n")
+                txt.insert("end", entry["output"], "out")
+                if _is_rtl(entry["output"]):
+                    txt.tag_add("rtl", ln_start, txt.index("end-1c"))
+                txt.insert("end", "\n\n")
             txt.config(state="disabled")
 
         def _poll():
@@ -1208,6 +1297,7 @@ def open_history(icon=None, item=None):
 
         def _clear():
             _history.clear()
+            save_history()
             _render()
 
         tk.Button(
@@ -1244,11 +1334,20 @@ def open_history(icon=None, item=None):
         txt.tag_config("stt",    foreground="#888888")
         txt.tag_config("lbl_p",  foreground="#555555", font=("Segoe UI", 8))
         txt.tag_config("out",    foreground="#ffffff")
+        # Persian/Arabic lines render right-aligned; English stays left (per-line).
+        txt.tag_config("rtl",    justify="right")
 
         _render()
         win.after(500, _poll)
 
         _history_window = win
+
+        def _on_close():
+            global _history_window
+            _history_window = None
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
         win.update_idletasks()
         w = max(win.winfo_reqwidth(), 580)
         h = max(win.winfo_reqheight(), 420)
@@ -1256,10 +1355,8 @@ def open_history(icon=None, item=None):
         sh = win.winfo_screenheight()
         win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
         win.deiconify()
-        win.mainloop()
-        _history_window = None
 
-    threading.Thread(target=_build, daemon=True).start()
+    _ui_run(_build)
 
 
 # ─── System Tray ─────────────────────────────────────────────────────────────
@@ -1384,6 +1481,11 @@ def main():
 
     kb_thread = threading.Thread(target=keyboard_listener, daemon=True)
     kb_thread.start()
+
+    # Single Tk root on its own thread — Settings/History open as Toplevels on it.
+    ui_thread = threading.Thread(target=_ui_thread_main, daemon=True)
+    ui_thread.start()
+    time.sleep(0.2)  # let the Tk root come up before any tray callback fires
 
     if CHECK_UPDATES:
         threading.Thread(target=check_for_update, daemon=True).start()

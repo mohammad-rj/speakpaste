@@ -1,5 +1,6 @@
 .env
 settings.json
+history.json
 __pycache__/
 *.pyc
 *.pyo

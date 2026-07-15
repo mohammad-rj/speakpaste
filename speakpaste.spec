@@ -1,11 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+import speech_recognition
+
+# speech_recognition needs its bundled FLAC encoder to POST audio to Google.
+# PyInstaller does not collect it automatically, so the frozen exe raises
+# "[WinError 2] The system cannot find the file specified" on every Google
+# transcription. Ship flac-win32.exe next to the package inside the bundle.
+_SR_DIR = os.path.dirname(speech_recognition.__file__)
+_sr_datas = [(os.path.join(_SR_DIR, 'flac-win32.exe'), 'speech_recognition')]
 
 a = Analysis(
     ['speakpaste.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=_sr_datas,
     hiddenimports=['keyboard', 'speech_recognition', 'sounddevice', 'soundfile', 'numpy', 'websockets'],
     hookspath=[],
     hooksconfig={},
