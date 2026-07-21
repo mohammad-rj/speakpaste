@@ -58,7 +58,7 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VERSION       = "1.10.0"
+VERSION       = "1.11.0"
 GITHUB_REPO   = "mohammad-rj/speakpaste"
 GITHUB_URL    = f"https://github.com/{GITHUB_REPO}"
 
@@ -123,6 +123,8 @@ _DEFAULTS = {
     "gemini_thinking_level":     "LOW",
     "gemini_media_resolution":   "LOW",
     "gemini_stt_model":          GEMINI_STT_DEFAULT_MODEL,
+    "inject_mode":               "auto",     # auto | type | paste
+    "notify_errors":             True,
     # ── Text-to-Speech (read selected text aloud) ───────────────────────────
     "tts_enabled":               True,
     "tts_hotkey":                "win+shift",
@@ -237,6 +239,8 @@ LANG_MODE                 = _cfg.get("lang_mode", "fixed")
 GEMINI_THINKING_LEVEL     = _cfg.get("gemini_thinking_level", "LOW")
 GEMINI_MEDIA_RESOLUTION   = _cfg.get("gemini_media_resolution", "LOW")
 GEMINI_STT_MODEL          = _cfg.get("gemini_stt_model", GEMINI_STT_DEFAULT_MODEL)
+INJECT_MODE               = _cfg.get("inject_mode", "auto")
+NOTIFY_ERRORS             = _cfg.get("notify_errors", True)
 
 TTS_ENABLED           = _cfg.get("tts_enabled", True)
 TTS_HOTKEY            = _cfg.get("tts_hotkey", "win+shift")
@@ -372,6 +376,7 @@ class INPUT(ctypes.Structure):
 # ─── Logging / Tray Icon ──────────────────────────────────────────────────────
 
 _log_last_t = [None]  # [timestamp of last log] for elapsed calculation
+_last_error = [None]  # last engine failure, surfaced to the user as a toast
 LOG_FILE    = os.path.join(APP_DIR, 'speakpaste.log')
 LOG_MAX     = 512 * 1024
 
@@ -602,6 +607,7 @@ def _transcribe_google_direct(audio_path):
         return text
     except Exception as e:
         log(f"Google error: {e}")
+        _last_error[0] = f"Google engine failed: {e}"
         return None
     finally:
         try:
@@ -659,15 +665,18 @@ def _transcribe_gemini(audio_path):
         resp = requests.post(url, headers=headers, json=payload, timeout=90)
         if resp.status_code != 200:
             log(f"Gemini STT error {resp.status_code}: {resp.text[:120]}")
+            _last_error[0] = f"Gemini refused the request (HTTP {resp.status_code})."
             return None
         text = PROVIDER_ADAPTERS["gemini"].parse_response(resp.json())
         if not text:
             log("Gemini STT: no speech recognised")
+            _last_error[0] = "No speech recognised - try speaking a little louder."
             return None
         log(f">> {text}")
         return text
     except Exception as e:
         log(f"Gemini STT error: {e}")
+        _last_error[0] = f"Gemini engine failed: {e}"
         return None
     finally:
         try:
@@ -740,6 +749,7 @@ def _transcribe_groq(audio_path):
         return None
     except Exception as e:
         log(f"Groq error: {e}")
+        _last_error[0] = f"Groq engine failed: {e}"
         return None
     finally:
         try:
@@ -917,6 +927,40 @@ def _send_unicode_char(char_code):
     user32.SendInput(1, ctypes.byref(up),   ctypes.sizeof(INPUT))
 
 
+VK_V = 0x56
+
+
+def _send_ctrl_v():
+    """Ctrl+V through SendInput with real virtual-key codes (see _send_ctrl_c)."""
+    def _ev(vk, up):
+        i = INPUT()
+        i.type = INPUT_KEYBOARD
+        i.iu.ki.wVk = vk
+        i.iu.ki.wScan = user32.MapVirtualKeyW(vk, 0)
+        i.iu.ki.dwFlags = KEYEVENTF_KEYUP if up else 0
+        return i
+
+    seq = (_ev(VK_CONTROL, False), _ev(VK_V, False),
+           _ev(VK_V, True),        _ev(VK_CONTROL, True))
+    arr = (INPUT * len(seq))(*seq)
+    user32.SendInput(len(seq), ctypes.byref(arr), ctypes.sizeof(INPUT))
+
+
+def _paste_text(text):
+    """Insert via the clipboard, restoring whatever was there before.
+
+    Some applications ignore synthetic per-character key events, and for long
+    transcripts typing one character at a time is also slow. Pasting solves
+    both, at the cost of briefly touching the clipboard.
+    """
+    old = _clipboard_get_text()
+    _clipboard_set_text(text)
+    time.sleep(0.06)
+    _send_ctrl_v()
+    time.sleep(0.25)          # let the target app read the clipboard first
+    _clipboard_set_text(old if old is not None else "")
+
+
 def type_text(text):
     if not text:
         return
@@ -929,6 +973,20 @@ def type_text(text):
             keyboard.release(k)
         except Exception:
             pass
+
+    # "auto" types short text (no clipboard involvement) but pastes long text,
+    # where per-character SendInput would take seconds.
+    mode = INJECT_MODE
+    if mode == "auto":
+        mode = "paste" if len(text) > 220 else "type"
+    if mode == "paste":
+        try:
+            _paste_text(text)
+            log(f"Pasted OK ({len(text)} chars)")
+            return
+        except Exception as e:
+            log(f"Paste failed, typing instead: {e}")
+
     for char in text:
         _send_unicode_char(ord(char))
         time.sleep(0.001)
@@ -2030,6 +2088,11 @@ def on_hotkey_release():
         })
         save_history()
         type_text(text)
+    else:
+        # Silence after a hotkey press is indistinguishable from a broken
+        # hotkey, so say what went wrong. _last_error is set by the engine.
+        show_toast(_last_error[0] or "Nothing was transcribed - try speaking again.")
+    _last_error[0] = None
     if tray_icon:
         tray_icon.icon = create_icon("idle")
 
@@ -2081,6 +2144,206 @@ def keyboard_listener():
         time.sleep(0.05)
 
 
+# ─── Hotkey capture & validation ──────────────────────────────────────────────
+
+# Combos Windows claims before any application hook sees them. Learned the hard
+# way: win+alt+x was configured, looked correct, and simply never fired because
+# the shell consumes Win+X for the Quick Link menu.
+_WINDOWS_RESERVED = {
+    "win+l": "Windows locks the screen",
+    "win+x": "Windows opens the Quick Link menu",
+    "win+d": "Windows shows the desktop",
+    "win+e": "Windows opens File Explorer",
+    "win+r": "Windows opens the Run dialog",
+    "win+s": "Windows opens Search",
+    "win+i": "Windows opens Settings",
+    "win+a": "Windows opens the Action Center",
+    "win+v": "Windows opens clipboard history",
+    "win+g": "Windows opens Game Bar",
+    "win+h": "Windows starts its own voice typing",
+    "win+tab": "Windows opens Task View",
+    "ctrl+alt+delete": "reserved by Windows security",
+    "alt+tab": "Windows switches windows",
+    "alt+f4": "Windows closes the active window",
+}
+
+_MODIFIERS = ("ctrl", "win", "alt", "shift")
+
+
+def validate_hotkey(combo):
+    """(ok, message). Rejects empty, modifier-less and Windows-reserved combos."""
+    combo = (combo or "").strip().lower()
+    if not combo:
+        return False, "Hotkey is empty."
+    parts = [p.strip() for p in combo.split("+") if p.strip()]
+    if not parts:
+        return False, "Hotkey is empty."
+
+    mods = [p for p in parts if p in _MODIFIERS]
+    if not mods:
+        return False, "Needs at least one modifier (ctrl, win, alt or shift)."
+
+    for k in parts:
+        try:
+            keyboard.key_to_scan_codes(k)
+        except Exception:
+            return False, f"'{k}' is not a key name the app understands."
+
+    key = "+".join(sorted(mods, key=_MODIFIERS.index)
+                   + sorted(p for p in parts if p not in _MODIFIERS))
+    for reserved, why in _WINDOWS_RESERVED.items():
+        r_parts = reserved.split("+")
+        if sorted(r_parts) == sorted(parts):
+            return False, f"{reserved} will not reach the app - {why}."
+        # A Win+letter combo is swallowed even with extra modifiers held.
+        if ("win" in parts and len(r_parts) == 2 and r_parts[0] == "win"
+                and r_parts[1] in parts):
+            return False, (f"Windows takes Win+{r_parts[1]} ({why}), so this "
+                           f"combo may never fire.")
+    return True, key
+
+
+def capture_hotkey(parent, on_done):
+    """Modal 'press the combination' capture. Returns the combo via on_done."""
+    dlg = tk.Toplevel(parent)
+    dlg.withdraw()
+    dlg.title("Press a key combination")
+    dlg.configure(bg="#1e1e1e")
+    dlg.resizable(False, False)
+    dlg.transient(parent)
+
+    tk.Label(dlg, text="Hold the combination you want, then release.",
+             bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9),
+             padx=24, pady=(16)).pack()
+    shown = tk.Label(dlg, text="…", bg="#1e1e1e", fg="#ffffff",
+                     font=("Segoe UI", 14, "bold"), pady=8)
+    shown.pack()
+    hint = tk.Label(dlg, text="Esc to cancel", bg="#1e1e1e", fg="#666666",
+                    font=("Segoe UI", 8), pady=(0))
+    hint.pack(pady=(0, 14))
+
+    state = {"held": [], "done": False}
+
+    def _finish(combo):
+        if state["done"]:
+            return
+        state["done"] = True
+        try:
+            dlg.destroy()
+        except Exception:
+            pass
+        if combo:
+            on_done(combo)
+
+    def _on_press(e):
+        name = {"control_l": "ctrl", "control_r": "ctrl", "alt_l": "alt",
+                "alt_r": "alt", "shift_l": "shift", "shift_r": "shift",
+                "super_l": "win", "super_r": "win"}.get(e.keysym.lower(),
+                                                        e.keysym.lower())
+        if name == "escape":
+            _finish(None)
+            return "break"
+        if name not in state["held"]:
+            state["held"].append(name)
+        ordered = ([m for m in _MODIFIERS if m in state["held"]]
+                   + [k for k in state["held"] if k not in _MODIFIERS])
+        shown.config(text="+".join(ordered))
+        return "break"
+
+    def _on_release(_e):
+        if state["held"] and not state["done"]:
+            ordered = ([m for m in _MODIFIERS if m in state["held"]]
+                       + [k for k in state["held"] if k not in _MODIFIERS])
+            _finish("+".join(ordered))
+        return "break"
+
+    dlg.bind("<KeyPress>", _on_press)
+    dlg.bind("<KeyRelease>", _on_release)
+    dlg.protocol("WM_DELETE_WINDOW", lambda: _finish(None))
+
+    dlg.update_idletasks()
+    w, h = max(300, dlg.winfo_reqwidth()), dlg.winfo_reqheight()
+    px, py = parent.winfo_rootx(), parent.winfo_rooty()
+    pw, ph = parent.winfo_width(), parent.winfo_height()
+    dlg.geometry(f"{w}x{h}+{px + (pw - w) // 2}+{py + (ph - h) // 3}")
+    dlg.deiconify()
+    dlg.grab_set()
+    dlg.focus_force()
+
+
+# ─── Toast notification ───────────────────────────────────────────────────────
+
+_toast_win = None
+
+
+def show_toast(message, kind="error", seconds=4):
+    """Brief borderless message near the tray. A failure that only writes to a
+    log line is indistinguishable from the hotkey not working at all."""
+    if not NOTIFY_ERRORS:
+        return
+
+    def _build():
+        global _toast_win
+        if _toast_win is not None:
+            try:
+                _toast_win.destroy()
+            except Exception:
+                pass
+            _toast_win = None
+
+        accent = {"error": "#e05252", "info": "#4c9aff", "ok": "#4caf50"}.get(kind, "#4c9aff")
+        win = tk.Toplevel(_ui_root)
+        win.withdraw()
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.attributes("-alpha", 0.0)
+        win.configure(bg="#3a3a3a")
+
+        card = tk.Frame(win, bg="#181818")
+        card.pack(fill="both", expand=True, padx=1, pady=1)
+        tk.Frame(card, bg=accent, width=3).pack(side="left", fill="y")
+        body = tk.Frame(card, bg="#181818", padx=12, pady=9)
+        body.pack(side="left", fill="both", expand=True)
+        tk.Label(body, text="SpeakPaste", bg="#181818", fg="#7a7a7a",
+                 font=("Segoe UI", 7)).pack(anchor="w")
+        tk.Label(body, text=message, bg="#181818", fg="#e8e8e8",
+                 font=("Segoe UI", 9), wraplength=280, justify="left"
+                 ).pack(anchor="w", pady=(1, 0))
+
+        win.update_idletasks()
+        w = max(240, min(320, win.winfo_reqwidth()))
+        h = win.winfo_reqheight()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"{w}x{h}+{sw - w - 24}+{sh - h - 72}")
+        win.deiconify()
+
+        def _fade_in(a=0.0):
+            if not win.winfo_exists():
+                return
+            a = min(0.96, a + 0.16)
+            win.attributes("-alpha", a)
+            if a < 0.96:
+                win.after(16, lambda: _fade_in(a))
+
+        def _dismiss():
+            global _toast_win
+            if _toast_win is win:
+                _toast_win = None
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        card.bind("<Button-1>", lambda e: _dismiss())
+        for child in body.winfo_children():
+            child.bind("<Button-1>", lambda e: _dismiss())
+        win.after(int(seconds * 1000), _dismiss)
+        _fade_in()
+        _toast_win = win
+
+    _ui_run(_build)
+
+
 # ─── Tk UI thread (single root) ───────────────────────────────────────────────
 
 def _ui_run(fn):
@@ -2116,7 +2379,7 @@ def _apply_settings(new_cfg):
     global STT_ENGINE, PROMPT_MODE, HOTKEY, LANGUAGE, MIC_MODE, GROQ_API_KEY, MODEL, WS_PORT, CHECK_UPDATES
     global GOOGLE_CLOUD_API_KEY
     global GEMINI_API_KEY, GEMINI_SYSTEM_PROMPT, LANG_MODE, GEMINI_THINKING_LEVEL, GEMINI_MEDIA_RESOLUTION
-    global GEMINI_STT_MODEL
+    global GEMINI_STT_MODEL, INJECT_MODE, NOTIFY_ERRORS
     global TTS_ENABLED, TTS_HOTKEY, TTS_ENGINE, TTS_EDGE_VOICE, TTS_VERTEX_VOICE
     global TTS_VERTEX_MODEL, TTS_VERTEX_CRED, TTS_VERTEX_PROJECT, TTS_STYLE
     global TTS_SPEED, TTS_POPUP, TTS_POPUP_AUTOCLOSE, TTS_CHUNK_SECS, TTS_FIRST_CHUNK_SECS
@@ -2140,6 +2403,8 @@ def _apply_settings(new_cfg):
     GEMINI_THINKING_LEVEL   = new_cfg.get("gemini_thinking_level", "LOW")
     GEMINI_MEDIA_RESOLUTION = new_cfg.get("gemini_media_resolution", "LOW")
     GEMINI_STT_MODEL        = new_cfg.get("gemini_stt_model", GEMINI_STT_DEFAULT_MODEL)
+    INJECT_MODE             = new_cfg.get("inject_mode", "auto")
+    NOTIFY_ERRORS           = new_cfg.get("notify_errors", True)
 
     TTS_ENABLED         = new_cfg.get("tts_enabled", True)
     TTS_HOTKEY          = new_cfg.get("tts_hotkey", "win+shift")
@@ -2449,11 +2714,36 @@ def open_settings(icon=None, item=None):
         tk.Checkbutton(tab_tts, text="Enable  —  select text anywhere, press the hotkey, hear it",
                        variable=tts_on_var, **chk_cfg).pack(anchor="w")
 
+        def _hotkey_row(parent, var):
+            """Hotkey entry + a Record button that captures and validates."""
+            warn = tk.Label(parent, text="", bg="#1e1e1e", fg="#e0a030",
+                            font=("Segoe UI", 8), wraplength=330, justify="left")
+
+            def _check(*_):
+                ok, msg = validate_hotkey(var.get())
+                warn.config(text="" if ok else "⚠  " + msg)
+
+            def _record():
+                def _got(combo):
+                    ok, msg = validate_hotkey(combo)
+                    var.set(combo)
+                    warn.config(text="" if ok else "⚠  " + msg)
+                capture_hotkey(win, _got)
+
+            tk.Entry(parent, textvariable=var, width=18, **ent_style).pack(side="left")
+            tk.Button(parent, text="Record", command=_record,
+                      bg="#3c3c3c", fg="#cccccc", relief="flat",
+                      font=("Segoe UI", 8), activebackground="#4c4c4c",
+                      activeforeground="#ffffff").pack(side="left", padx=(6, 0))
+            var.trace_add("write", _check)
+            _check()
+            return warn
+
         row_th = tk.Frame(tab_tts, bg="#1e1e1e")
         row_th.pack(fill="x", pady=(6, 2))
         tk.Label(row_th, text="Hotkey:", width=12, anchor="w", **lbl_style).pack(side="left")
         tts_hotkey_var = tk.StringVar(value=TTS_HOTKEY)
-        tk.Entry(row_th, textvariable=tts_hotkey_var, width=20, **ent_style).pack(side="left")
+        _hotkey_row(row_th, tts_hotkey_var).pack(in_=tab_tts, anchor="w", pady=(0, 4))
 
         section("Voice Engine", tab_tts)
         tts_eng_var = tk.StringVar(value=TTS_ENGINE)
@@ -2609,7 +2899,7 @@ def open_settings(icon=None, item=None):
         row1.pack(fill="x", pady=2)
         tk.Label(row1, text="Hotkey:", width=12, anchor="w", **lbl_style).pack(side="left")
         hotkey_var = tk.StringVar(value=HOTKEY)
-        tk.Entry(row1, textvariable=hotkey_var, width=20, **ent_style).pack(side="left")
+        _hotkey_row(row1, hotkey_var).pack(in_=tab_gen, anchor="w", pady=(0, 4))
 
         row2 = tk.Frame(tab_gen, bg="#1e1e1e")
         row2.pack(fill="x", pady=2)
@@ -2639,11 +2929,26 @@ def open_settings(icon=None, item=None):
         tk.Radiobutton(tab_gen, text="On demand  (mic opens only while hotkey held — more secure)",
                        variable=mic_var, value="on_demand", **rb_cfg).pack(anchor="w")
 
+        # ── Text insertion ───────────────────────────────────────────────────
+        section("Text insertion", tab_gen)
+        inject_var = tk.StringVar(value=INJECT_MODE)
+        for label, val in [
+                ("Automatic  —  type short text, paste long text", "auto"),
+                ("Always type  —  key by key, never touches the clipboard", "type"),
+                ("Always paste  —  for apps that ignore synthetic keystrokes", "paste")]:
+            tk.Radiobutton(tab_gen, text=label, variable=inject_var, value=val,
+                           **rb_cfg).pack(anchor="w")
+        tk.Label(tab_gen, text="Pasting restores your previous clipboard content afterwards.",
+                 bg="#1e1e1e", fg="#666666", font=("Segoe UI", 8)).pack(anchor="w")
+
         # ── General options ──────────────────────────────────────────────────
         section("Options", tab_gen)
         updates_var = tk.BooleanVar(value=CHECK_UPDATES)
         tk.Checkbutton(tab_gen, text="Check for updates on startup",
                        variable=updates_var, **chk_cfg).pack(anchor="w")
+        notify_var = tk.BooleanVar(value=NOTIFY_ERRORS)
+        tk.Checkbutton(tab_gen, text="Show a notification when something fails",
+                       variable=notify_var, **chk_cfg).pack(anchor="w")
 
         # ── Buttons (shared footer, outside the notebook) ─────────────────────
         footer_area = tk.Frame(win, bg="#1e1e1e", padx=20, pady=10)
@@ -2674,6 +2979,8 @@ def open_settings(icon=None, item=None):
                 "gemini_thinking_level":    thinking_var.get(),
                 "gemini_media_resolution":  media_res_var.get(),
                 "gemini_stt_model":         gstt_model_var.get().strip() or GEMINI_STT_DEFAULT_MODEL,
+                "inject_mode":          inject_var.get(),
+                "notify_errors":        notify_var.get(),
                 "tts_enabled":          tts_on_var.get(),
                 "tts_hotkey":           tts_hotkey_var.get().strip(),
                 "tts_engine":           tts_eng_var.get(),

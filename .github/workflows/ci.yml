@@ -18,3 +18,9 @@ jobs:
 
       - name: Check syntax
         run: python -m py_compile speakpaste.py && echo "Syntax OK"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
