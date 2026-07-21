@@ -8,3 +8,4 @@ pillow
 python-dotenv
 websockets>=10.0
 SpeechRecognition
+edge-tts

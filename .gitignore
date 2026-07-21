@@ -9,3 +9,12 @@ build/
 dist/
 .venv/
 venv/
+
+# Runtime logs contain verbatim dictation - never publish
+speakpaste.log
+speakpaste.log.old
+*.log
+
+# Local dev tooling
+CLAUDE.md
+.code-review-graph/

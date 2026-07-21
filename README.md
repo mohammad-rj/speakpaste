@@ -1,42 +1,41 @@
 # SpeakPaste
 
-**Talk → Text → Paste. Anywhere.**
+**Speak to type. Select to listen.** Anywhere in Windows.
 
-Hold a hotkey, speak, release — your words appear instantly wherever your cursor is.
+![Windows](https://img.shields.io/badge/Windows-10%2F11-blue) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Free](https://img.shields.io/badge/Engines-free%20by%20default-brightgreen)
 
-![Windows](https://img.shields.io/badge/Windows-10%2F11-blue) ![License](https://img.shields.io/badge/License-MIT-green)
+|  | Hold | What happens |
+|---|---|---|
+| 🎙️ **Type with your voice** | `Win + Alt` | Speak, let go, and your words are typed wherever the cursor is |
+| 🔊 **Hear any text** | `Win + Shift` | Whatever text you have selected is read aloud |
 
-## Download
+No account. No API key needed. Both default engines are free.
 
-Grab the latest **[SpeakPaste.exe](https://github.com/mohammad-rj/speakpaste/releases/latest)** — single file, no install.
-
----
-
-## Engines
-
-| Engine | Output | Free | Requires |
-|--------|--------|------|----------|
-| `google` | Transcribed text | Yes | Nothing |
-| `google-cloud` | Transcribed text | Free tier | API key |
-| `groq` | Transcribed text | ~8h/day free | API key |
-| `google-ext` | Transcribed text | Yes | Chrome in background |
-| `gemini-lite` | English programming prompt | Free tier | Gemini API key |
-| `gemini-flash` | English programming prompt | Free tier | Gemini API key |
-
-Default: `google` — no key, no setup.
+**[⬇ Download SpeakPaste.exe](https://github.com/mohammad-rj/speakpaste/releases/latest)** — one file, no installer.
 
 ---
 
-## Quick Start
+## Why you might want it
 
-### Option A — Exe (recommended)
+- **It works in every app.** Not a browser extension and not a text box you paste into — text goes straight to your cursor in Word, VS Code, Telegram, a terminal, anywhere.
+- **It speaks your language.** Strong Persian/Farsi support, plus 100+ others. The `gemini` engine detects the language from your voice, so you never set it.
+- **It keeps mixed language intact.** Say *"برو روی branch جدید و commit رو merge کن"* and the English technical words stay in English instead of being mangled into Persian letters. Most dictation tools cannot do this.
+- **It reads back.** Long article, PDF, someone's message — select it and listen instead of reading.
 
-1. Download **SpeakPaste.exe** from [Releases](https://github.com/mohammad-rj/speakpaste/releases/latest)
-2. Run it — green icon appears in system tray
-3. Right-click → **Settings** to pick your engine and configure
-4. Hold **Win+Alt**, speak, release — text appears at cursor
+---
 
-### Option B — Run from source
+## Getting started
+
+1. Download **SpeakPaste.exe** and run it. A green dot appears in your system tray.
+2. Hold **Win+Alt**, say something, release. The text is typed at your cursor.
+3. Select any text and press **Win+Shift**. It is read aloud.
+
+That is the whole product. Everything below is optional tuning.
+
+To change anything, right-click the tray icon → **Settings**.
+
+<details>
+<summary>Run from source instead</summary>
 
 ```bash
 git clone https://github.com/mohammad-rj/speakpaste.git
@@ -46,115 +45,124 @@ python -m venv .venv
 pip install -r requirements.txt
 python speakpaste.py
 ```
+</details>
+
+---
+
+## Typing with your voice
+
+Hold the hotkey while you talk, release when you are done. The transcript is typed
+into the focused window through Windows itself, so it behaves like a real keyboard
+and works even in apps that block pasting.
+
+**Choose an engine** in Settings → *Speech → Text*:
+
+| Engine | Cost | Needs | Good for |
+|---|---|---|---|
+| **`gemini`** | Free credit | Google credential *or* free API key | **Best Persian, detects language by itself, keeps English words in English** |
+| `google` | Free | Nothing | Fast and accurate, but you must set the language yourself |
+| `google-cloud` | Free tier | API key | Official endpoint, more reliable than `google` |
+| `groq` | Free tier | API key | Whisper, 50+ languages |
+| `google-ext` | Free | Chrome running | Browser-based fallback |
+
+`google` is the default because it needs no setup. Switch to `gemini` if you mix
+Persian and English, or if you do not want to think about language settings at all.
+
+**Optional AI rewriting** — in Settings → *Prompt*, SpeakPaste can send what you said
+through Gemini and type a clean English coding prompt instead of a raw transcript.
+Useful when you talk to an AI assistant in your own language but want it to receive
+polished English.
+
+---
+
+## Listening to text
+
+Select text anywhere and press **Win+Shift**. A small player appears in the corner:
+
+- **⏸ / ▶** pause and resume, **⏹** stop
+- **◀◀ / ▶▶** jump between parts of a long text — pressing back mid-part replays that part from its start
+- **Seek bar** — click anywhere to jump; the tick marks show where each part begins
+- **Speed** — 0.5× to 2×, changes instantly, and the voice does not turn into a chipmunk
+- Closes itself 30 seconds after it finishes
+
+Your clipboard is not disturbed. SpeakPaste copies the selection, reads it, and puts
+your previous clipboard content back exactly as it was.
+
+Long text starts playing after a few seconds rather than making you wait for the
+whole thing: it is split at sentence boundaries, the next parts are prepared while
+the current one plays, and the counter shows which part you are on (`part 2/5`).
+Missed something? Press ◀◀ to hear that part again.
+
+| Engine | Cost | Needs | Voice |
+|---|---|---|---|
+| **`edge`** | Free | Nothing | Microsoft neural voices — Persian, English, Turkish, Arabic |
+| `vertex` | Free credit | Google credential | Gemini TTS, and you can describe *how* it should read in plain words |
+
+The tray menu also has **Read clipboard aloud** for cases where copying with Ctrl+C
+does not work, such as inside a terminal.
 
 ---
 
 ## Settings
 
-All configuration is done via the built-in **Settings window** (tray → Settings):
+Right-click the tray icon → **Settings**. Three tabs:
 
-- **Engine** — pick your STT backend; API key field expands inline when needed
-- **Prompt** — off (raw transcript), `gemini-lite` (transcript → prompt), or `gemini-flash` (voice → prompt directly)
-  - **Thinking level** — Minimal / Low / Medium / High (default: Low)
-  - **Media resolution** — Low / Medium / High (default: Low)
-- **Hotkey** — default `win+alt`, change to anything
-- **Language** — e.g. `fa`, `en`, `ar` (or full BCP-47 like `fa-IR`)
-- **Follow Windows keyboard layout** — when checked, language is detected automatically from your active keyboard layout at the moment you press the hotkey; no manual switching needed (see below)
-- **Microphone mode** — Always-on or On-demand (toggle live from tray)
-- **Check for updates** — notified via tray tooltip on startup
+**Speech → Text** — engine, API keys, and the optional AI prompt rewriting.
 
-Settings are saved to `settings.json` next to the exe.
+**Text → Speech** — voice engine, voice, reading speed, the player widget, and a
+**Test voice** button so you can hear a change without closing the window.
 
----
+**General** — hotkeys, language, microphone mode, update checks.
 
-## Auto language detection
+A few things worth knowing:
 
-Enable **Follow Windows keyboard layout** in Settings to let SpeakPaste detect your language automatically.
-
-- Switch to Persian layout with **Alt+Shift** → hold hotkey → speak Persian
-- Switch to English layout → hold hotkey → speak English
-- No need to open Settings to change the language — just toggle your keyboard layout as usual
-
-The language is read once when you press the hotkey and stays fixed for the entire recording session. If your layout isn't recognised, it falls back to the language set in the Language field.
-
-Supported layouts: Persian/Farsi, English, Arabic, Turkish, German, French, Russian, Portuguese, Spanish, Japanese, Korean, Chinese.
+- **Language** only matters for engines that cannot detect it themselves. With
+  `gemini` it is ignored entirely. With `google`, either set it to your usual
+  language or tick *Follow Windows keyboard layout* to switch with Alt+Shift.
+- **Microphone mode** — *Always on* keeps a 500 ms buffer so the start of your
+  sentence is never clipped. *On demand* only opens the mic while the hotkey is held,
+  which is the more private option. Toggle it from the tray at any time.
+- Settings live in `settings.json` next to the exe.
 
 ---
 
 ## History
 
-Right-click the tray icon and select **History** to see all transcriptions from the current session.
+Tray → **History** shows everything from this session — what you dictated and what
+was read aloud, newest first, Persian lines right-aligned.
 
-- Each entry shows the timestamp, engine used, and the output text
-- For `gemini-lite` (two-step processing): both the raw voice transcription and the converted English prompt are shown as separate rows
-- **Show voice text** checkbox toggles the raw STT row for gemini-lite entries
-- The list updates in real-time — new entries appear instantly without closing the window
-- **Clear** wipes the session history
-
-History is in-memory only and resets when SpeakPaste is restarted.
+**Click any line to copy it back to your clipboard.** History survives restarts.
 
 ---
 
-## Engine details
+## Privacy
 
-**`google`** (default — recommended for most users)
-- Google's speech API via [SpeechRecognition](https://github.com/Uberi/speech_recognition)
-- Same engine as Android voice typing — excellent Persian/Farsi support
-- Unofficial endpoint, no API key, no Chrome required
-- Caveat: unofficial, could change without notice
+Audio and text are sent to whichever engine you pick, and nowhere else. There is no
+SpeakPaste server, no account, and no telemetry.
 
-**`google-cloud`**
-- Official [Google Cloud Speech-to-Text](https://cloud.google.com/speech-to-text) REST API
-- Higher accuracy and reliability than the unofficial engine
-- Free tier: 60 min/month — sufficient for personal use
-- Get a key: [console.cloud.google.com](https://console.cloud.google.com) → Speech-to-Text API → Credentials
-
-**`groq`**
-- Records audio → sends to [Groq Whisper API](https://console.groq.com)
-- Free API key, ~8 hours/day limit
-- Very accurate, 50+ languages
-
-**`google-ext`**
-- Chrome Manifest V3 extension with Offscreen Document
-- `webkitSpeechRecognition` running fully hidden in background
-- Requires Chrome installed and running
-- Setup: `chrome://extensions` → Developer mode → Load unpacked → select `extension/`
-
-**`gemini-lite`**
-- Records audio → Google STT (free) → text → [Gemini Flash Lite](https://aistudio.google.com) → English programming prompt
-- Speak in any language — output is always a clean English prompt for your AI coding assistant
-- Get a free key: [aistudio.google.com](https://aistudio.google.com) → Get API key
-- System prompt is fully customizable in Settings
-- **Thinking level** and **media resolution** configurable in Settings (default: Low for both — minimum latency)
-
-**`gemini-flash`**
-- Records audio → sends WAV directly to [Gemini Flash](https://aistudio.google.com) (multimodal) → English programming prompt
-- Skips the STT step entirely — Gemini understands voice directly
-- Same Gemini API key as `gemini-lite`; configurable system prompt
-- **Thinking level** and **media resolution** configurable in Settings (default: Low for both — minimum latency)
+Keys and history are stored in plain files (`settings.json`, `history.json`) beside
+the executable, so treat that folder as private and do not share it.
 
 ---
 
-## Microphone mode
-
-| Mode | Mic | Pre-roll | Privacy |
-|------|-----|----------|---------|
-| Always-on | Open all the time | 500ms buffer — no cut-off | Mic icon always visible |
-| On-demand | Opens only while hotkey held | None | Closed when idle |
-
-Toggle live from tray without restarting.
-
----
-
-## Build from source
+## Build it yourself
 
 ```bash
+pip install -r requirements.txt
 pip install pyinstaller
 pyinstaller speakpaste.spec
 ```
 
 Output: `dist/SpeakPaste.exe`
 
+---
+
 ## License
 
-MIT
+SpeakPaste's own source is [Apache License 2.0](LICENSE).
+
+The built executable bundles third-party components under their own licenses,
+including LGPL libraries (`pystray`, `edge-tts`, `libsndfile`) and a GPL-2.0 FLAC
+encoder used by the `google` engine. [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)
+lists every dependency with its verified license and explains how to rebuild or
+relink the executable.

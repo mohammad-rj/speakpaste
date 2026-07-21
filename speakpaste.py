@@ -1,6 +1,11 @@
 """
-SpeakPaste - Voice to Text
+SpeakPaste - Voice to Text, and Text to Voice
 Hold Win+Alt to record, release to transcribe and paste.
+Select text anywhere and press Win+Shift to hear it read aloud.
+
+Speech engines (tts_engine):
+  edge          — free Microsoft Edge neural voices, no key  [default]
+  vertex        — Gemini-TTS on Vertex AI (credential file, tunable tone)
 
 Transcription engines (stt_engine):
   google        — Google Speech API (unofficial, free, no key)  [default]
@@ -31,6 +36,14 @@ import winreg
 import ctypes
 import json
 import asyncio
+import base64
+import re
+import wave
+import urllib.parse
+import urllib.request
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
 import tkinter as tk
 from tkinter import ttk, messagebox
 from ctypes import wintypes
@@ -45,7 +58,7 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VERSION       = "1.9.0"
+VERSION       = "1.10.0"
 GITHUB_REPO   = "mohammad-rj/speakpaste"
 GITHUB_URL    = f"https://github.com/{GITHUB_REPO}"
 
@@ -72,6 +85,27 @@ GEMINI_DEFAULT_SYSTEM_PROMPT = (
     "Output: Write a Python class for user management with login and logout methods."
 )
 
+# Measured 2026-07-21 on code-switched Persian+English: 3.6 keeps "branch",
+# "commit" and "merge" in Latin script where gemini-flash-latest mangles them.
+GEMINI_STT_DEFAULT_MODEL = "gemini-3.6-flash"
+
+TTS_DEFAULT_STYLE = (
+    "Speak fast in casual street Persian - a quick friendly update, short pauses, "
+    "clearly articulated, but NOT rushed or breathless; a notch below rapid-fire, "
+    "a comfortable brisk pace you could listen to all day."
+)
+
+# Edge voices are free and need no key. Vertex needs a service-account/ADC file.
+TTS_EDGE_VOICES = [
+    "fa-IR-FaridNeural", "fa-IR-DilaraNeural",
+    "en-US-AndrewNeural", "en-US-AriaNeural", "en-US-GuyNeural",
+    "tr-TR-AhmetNeural", "tr-TR-EmelNeural", "ar-SA-HamedNeural",
+]
+TTS_VERTEX_VOICES = ["Zubenelgenubi", "Achird", "Sadachbia", "Umbriel", "Charon",
+                     "Puck", "Kore", "Aoede", "Leda", "Orus", "Fenrir"]
+TTS_VERTEX_MODELS = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-tts",
+                     "gemini-2.5-pro-tts"]
+
 _DEFAULTS = {
     "stt_engine":                "google",
     "prompt_mode":               "off",
@@ -88,6 +122,22 @@ _DEFAULTS = {
     "lang_mode":                 "fixed",
     "gemini_thinking_level":     "LOW",
     "gemini_media_resolution":   "LOW",
+    "gemini_stt_model":          GEMINI_STT_DEFAULT_MODEL,
+    # ── Text-to-Speech (read selected text aloud) ───────────────────────────
+    "tts_enabled":               True,
+    "tts_hotkey":                "win+shift",
+    "tts_engine":                "edge",       # edge | vertex
+    "tts_edge_voice":            "fa-IR-FaridNeural",
+    "tts_vertex_voice":          "Zubenelgenubi",
+    "tts_vertex_model":          "gemini-3.1-flash-tts-preview",
+    "tts_vertex_cred":           "",           # path to ADC / service-account json
+    "tts_vertex_project":        "",           # blank = read from the cred file
+    "tts_style":                 TTS_DEFAULT_STYLE,
+    "tts_speed":                 1.0,
+    "tts_popup":                 True,
+    "tts_popup_autoclose":       30,           # seconds after playback ends; 0 = never
+    "tts_chunk_secs":            25,           # target speech seconds per chunk
+    "tts_first_chunk_secs":      8,            # shorter first chunk = faster start
 }
 
 # ─── Settings Load / Save ─────────────────────────────────────────────────────
@@ -186,6 +236,22 @@ GEMINI_SYSTEM_PROMPT      = _cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYST
 LANG_MODE                 = _cfg.get("lang_mode", "fixed")
 GEMINI_THINKING_LEVEL     = _cfg.get("gemini_thinking_level", "LOW")
 GEMINI_MEDIA_RESOLUTION   = _cfg.get("gemini_media_resolution", "LOW")
+GEMINI_STT_MODEL          = _cfg.get("gemini_stt_model", GEMINI_STT_DEFAULT_MODEL)
+
+TTS_ENABLED           = _cfg.get("tts_enabled", True)
+TTS_HOTKEY            = _cfg.get("tts_hotkey", "win+shift")
+TTS_ENGINE            = _cfg.get("tts_engine", "edge")
+TTS_EDGE_VOICE        = _cfg.get("tts_edge_voice", "fa-IR-FaridNeural")
+TTS_VERTEX_VOICE      = _cfg.get("tts_vertex_voice", "Zubenelgenubi")
+TTS_VERTEX_MODEL      = _cfg.get("tts_vertex_model", "gemini-3.1-flash-tts-preview")
+TTS_VERTEX_CRED       = _cfg.get("tts_vertex_cred", "")
+TTS_VERTEX_PROJECT    = _cfg.get("tts_vertex_project", "")
+TTS_STYLE             = _cfg.get("tts_style", TTS_DEFAULT_STYLE)
+TTS_SPEED             = float(_cfg.get("tts_speed", 1.0))
+TTS_POPUP             = _cfg.get("tts_popup", True)
+TTS_POPUP_AUTOCLOSE   = int(_cfg.get("tts_popup_autoclose", 30))
+TTS_CHUNK_SECS        = float(_cfg.get("tts_chunk_secs", 25))
+TTS_FIRST_CHUNK_SECS  = float(_cfg.get("tts_first_chunk_secs", 8))
 
 _session_lang    = LANGUAGE  # language captured at hotkey press time
 _last_stt        = None      # intermediate STT text captured inside _transcribe_gemini
@@ -196,6 +262,7 @@ _history_window  = None
 
 is_recording     = False
 is_hotkey_active = False
+is_tts_hotkey_active = False
 audio_queue      = Queue()
 logs             = deque(maxlen=20)
 tray_icon        = None
@@ -305,6 +372,8 @@ class INPUT(ctypes.Structure):
 # ─── Logging / Tray Icon ──────────────────────────────────────────────────────
 
 _log_last_t = [None]  # [timestamp of last log] for elapsed calculation
+LOG_FILE    = os.path.join(APP_DIR, 'speakpaste.log')
+LOG_MAX     = 512 * 1024
 
 def log(msg):
     now  = time.time()
@@ -317,6 +386,14 @@ def log(msg):
     _log_last_t[0] = now
     print(line)
     logs.append(line)
+    # Also to disk: under pythonw/the frozen exe there is no console to read.
+    try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > LOG_MAX:
+            os.replace(LOG_FILE, LOG_FILE + ".old")
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(dt.strftime("%Y-%m-%d ") + line + "\n")
+    except Exception:
+        pass
     if tray_icon:
         recent = list(logs)[-3:]
         tray_icon.title = ("SpeakPaste\n" + "\n".join(l[:40] for l in recent))[:127]
@@ -382,6 +459,22 @@ def _start_recording():
     log("Recording...")
     if tray_icon:
         tray_icon.icon = create_icon("recording")
+
+
+def _cancel_recording():
+    """Drop an in-flight recording without transcribing (TTS hotkey took over)."""
+    global is_recording, audio_queue
+    if not is_recording:
+        return
+    is_recording = False
+    if MIC_MODE == "on_demand":
+        try:
+            audio_stream.stop()
+        except Exception:
+            pass
+    audio_queue = Queue()
+    if tray_icon:
+        tray_icon.icon = create_icon("idle")
 
 
 def _stop_recording():
@@ -470,6 +563,31 @@ PROVIDER_ADAPTERS = {
 }
 
 
+def _gemini_endpoint(model):
+    """(url, headers) for a Gemini call, preferring Vertex AI.
+
+    Vertex is used whenever a Google credential file is configured; the
+    generativelanguage.googleapis.com key path is only a fallback for users who
+    have an API key and no credential. Returns (None, None) if neither exists.
+    """
+    if TTS_VERTEX_CRED and os.path.exists(TTS_VERTEX_CRED):
+        try:
+            token, proj = _vertex_access_token(TTS_VERTEX_CRED)
+            project = TTS_VERTEX_PROJECT or proj
+            if project:
+                return (f"https://aiplatform.googleapis.com/v1/projects/{project}"
+                        f"/locations/global/publishers/google/models/"
+                        f"{model}:generateContent",
+                        {"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json"})
+        except Exception as e:
+            log(f"Vertex auth failed, falling back to API key: {str(e)[:70]}")
+    if GEMINI_API_KEY:
+        adapter = PROVIDER_ADAPTERS["gemini"]
+        return adapter.get_url(model, GEMINI_API_KEY), adapter.get_headers()
+    return None, None
+
+
 # ─── Transcription ────────────────────────────────────────────────────────────
 
 def _transcribe_google_direct(audio_path):
@@ -484,6 +602,72 @@ def _transcribe_google_direct(audio_path):
         return text
     except Exception as e:
         log(f"Google error: {e}")
+        return None
+    finally:
+        try:
+            os.unlink(audio_path)
+        except Exception:
+            pass
+
+
+GEMINI_STT_PROMPT = (
+    "You are a verbatim speech transcriber. Write down exactly what is said, "
+    "in the language it is said in. NEVER translate anything.\n"
+    "Rules:\n"
+    "1. Persian speech -> Persian script. English speech -> Latin script. "
+    "Detect this yourself from the audio; there is no language setting.\n"
+    "2. Code-switching is common and must be preserved: when a Persian sentence "
+    "contains English words - especially technical terms like loop, refactor, "
+    "commit, deploy, database, function, bug, merge, branch, API, server - "
+    "write those words in ENGLISH (Latin letters) inside the Persian sentence. "
+    "Do NOT find a Persian equivalent for them, and do NOT transliterate them "
+    "into Persian letters.\n"
+    "3. Apply normal punctuation and capitalisation.\n"
+    "4. Output ONLY the transcript: no preamble, no quotes, no explanation.\n"
+    "5. If there is no intelligible speech, output nothing."
+)
+
+
+def _transcribe_gemini(audio_path):
+    """Gemini transcription. The model detects the language itself, so no
+    language code is sent and the keyboard layout is irrelevant.
+
+    Uses Vertex AI when a credential is configured (EP rule: Vertex only while
+    free credit lasts) and falls back to the Gemini API key otherwise, so the
+    public build still works for users who only have an API key.
+    """
+    log("Transcribing (Gemini, auto language)...")
+    try:
+        with open(audio_path, 'rb') as f:
+            audio_b64 = base64.b64encode(f.read()).decode('utf-8')
+
+        payload = {
+            "systemInstruction": {"parts": [{"text": GEMINI_STT_PROMPT}]},
+            "contents": [{"role": "user", "parts": [
+                {"inlineData": {"mimeType": "audio/wav", "data": audio_b64}},
+                {"text": "Transcribe this recording."},
+            ]}],
+            # Thinking tokens share the output budget and only add latency here.
+            "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}},
+        }
+
+        url, headers = _gemini_endpoint(GEMINI_STT_MODEL)
+        if not url:
+            log("Gemini STT: no Vertex credential and no API key — open Settings")
+            return None
+
+        resp = requests.post(url, headers=headers, json=payload, timeout=90)
+        if resp.status_code != 200:
+            log(f"Gemini STT error {resp.status_code}: {resp.text[:120]}")
+            return None
+        text = PROVIDER_ADAPTERS["gemini"].parse_response(resp.json())
+        if not text:
+            log("Gemini STT: no speech recognised")
+            return None
+        log(f">> {text}")
+        return text
+    except Exception as e:
+        log(f"Gemini STT error: {e}")
         return None
     finally:
         try:
@@ -567,16 +751,16 @@ def _transcribe_groq(audio_path):
 def _gemini_lite_prompt(text):
     """Send transcribed text through Gemini Flash Lite to get a prompt. Returns prompted text or None."""
     global _last_stt
-    if not GEMINI_API_KEY:
-        log("Gemini: API key not set — open Settings")
+    url, headers = _gemini_endpoint(GEMINI_LITE_MODEL)
+    if not url:
+        log("Gemini: no credential and no API key — open Settings")
         return None
     _last_stt = text
     log("Converting to prompt (Gemini Lite)...")
     adapter = PROVIDER_ADAPTERS["gemini"]
     try:
         resp = requests.post(
-            adapter.get_url(GEMINI_LITE_MODEL, GEMINI_API_KEY),
-            headers=adapter.get_headers(),
+            url, headers=headers,
             json=adapter.build_text_request(GEMINI_SYSTEM_PROMPT, text,
                                             GEMINI_THINKING_LEVEL, GEMINI_MEDIA_RESOLUTION),
             timeout=30,
@@ -597,9 +781,9 @@ def _gemini_lite_prompt(text):
 
 def _gemini_flash_prompt(wav_path):
     """Send audio directly to Gemini Flash to get a prompt. Returns prompted text or None."""
-    import base64
-    if not GEMINI_API_KEY:
-        log("Gemini: API key not set — open Settings")
+    url, headers = _gemini_endpoint(GEMINI_FLASH_MODEL)
+    if not url:
+        log("Gemini: no credential and no API key — open Settings")
         try:
             os.unlink(wav_path)
         except Exception:
@@ -611,8 +795,7 @@ def _gemini_flash_prompt(wav_path):
         with open(wav_path, "rb") as f:
             audio_b64 = base64.b64encode(f.read()).decode("utf-8")
         resp = requests.post(
-            adapter.get_url(GEMINI_FLASH_MODEL, GEMINI_API_KEY),
-            headers=adapter.get_headers(),
+            url, headers=headers,
             json=adapter.build_audio_request(GEMINI_SYSTEM_PROMPT, audio_b64,
                                              GEMINI_THINKING_LEVEL, GEMINI_MEDIA_RESOLUTION),
             timeout=30,
@@ -752,6 +935,1050 @@ def type_text(text):
     log("Typed OK")
 
 
+# ─── Text-to-Speech ───────────────────────────────────────────────────────────
+# Reads the currently selected text (anywhere in Windows) aloud.
+#
+# Windows exposes no API to read another app's selection, so we use the standard
+# trick: stash the clipboard, send Ctrl+C, read it, put the old content back.
+
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE  = 0x0002
+kernel32 = ctypes.windll.kernel32
+
+user32.GetClipboardData.restype  = ctypes.c_void_p
+kernel32.GlobalLock.restype      = ctypes.c_void_p
+kernel32.GlobalLock.argtypes     = [ctypes.c_void_p]
+kernel32.GlobalUnlock.argtypes   = [ctypes.c_void_p]
+kernel32.GlobalAlloc.restype     = ctypes.c_void_p
+user32.SetClipboardData.restype  = ctypes.c_void_p
+user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+
+SENTINEL = "⁣__speakpaste_probe__⁣"   # invisible separators, never real text
+
+_tts_cache_dir = os.path.join(tempfile.gettempdir(), "speakpaste-tts")
+os.makedirs(_tts_cache_dir, exist_ok=True)
+
+_tts_player     = None   # TtsPlayer singleton, created lazily
+_tts_popup      = None   # popup Toplevel
+_tts_busy       = False
+_tts_last_text  = ""
+_tts_progress   = (0, 0)   # (chunks ready, chunks total) for the popup
+
+
+def _clipboard_open(retries=10):
+    for _ in range(retries):
+        if user32.OpenClipboard(0):
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _clipboard_get_text():
+    if not _clipboard_open():
+        return None
+    try:
+        h = user32.GetClipboardData(CF_UNICODETEXT)
+        if not h:
+            return None
+        p = kernel32.GlobalLock(h)
+        if not p:
+            return None
+        try:
+            return ctypes.c_wchar_p(p).value
+        finally:
+            kernel32.GlobalUnlock(h)
+    except Exception:
+        return None
+    finally:
+        user32.CloseClipboard()
+
+
+def _clipboard_set_text(text):
+    if text is None:
+        return
+    if not _clipboard_open():
+        return
+    try:
+        user32.EmptyClipboard()
+        buf  = ctypes.create_unicode_buffer(text)
+        size = ctypes.sizeof(buf)
+        h    = kernel32.GlobalAlloc(GMEM_MOVEABLE, size)
+        if not h:
+            return
+        p = kernel32.GlobalLock(h)
+        if not p:
+            return
+        ctypes.memmove(p, buf, size)
+        kernel32.GlobalUnlock(h)
+        user32.SetClipboardData(CF_UNICODETEXT, h)
+    except Exception:
+        pass
+    finally:
+        user32.CloseClipboard()
+
+
+VK_CONTROL = 0x11
+VK_C       = 0x43
+
+
+def _send_ctrl_c():
+    """Ctrl+C through Win32 SendInput with real virtual-key codes.
+
+    The `keyboard` library's press_and_release does not reach target windows
+    here (verified against Notepad: the clipboard never changes), so the copy
+    uses the same SendInput path that text injection already relies on.
+    """
+    def _ev(vk, up):
+        i = INPUT()
+        i.type = INPUT_KEYBOARD
+        i.iu.ki.wVk = vk
+        i.iu.ki.wScan = user32.MapVirtualKeyW(vk, 0)
+        i.iu.ki.dwFlags = KEYEVENTF_KEYUP if up else 0
+        return i
+
+    seq = (_ev(VK_CONTROL, False), _ev(VK_C, False),
+           _ev(VK_C, True),        _ev(VK_CONTROL, True))
+    arr = (INPUT * len(seq))(*seq)
+    user32.SendInput(len(seq), ctypes.byref(arr), ctypes.sizeof(INPUT))
+
+
+def get_selected_text(timeout=1.2):
+    """Copy the active selection without clobbering the user's clipboard."""
+    # Ctrl+C only means "copy" once the hotkey's own modifiers are physically up.
+    deadline = time.time() + 3
+    hk = [k for k in TTS_HOTKEY.split('+') if k]
+    while time.time() < deadline and any(keyboard.is_pressed(k) for k in hk):
+        time.sleep(0.05)
+    for k in ['left windows', 'right windows', 'alt', 'ctrl', 'shift']:
+        try:
+            keyboard.release(k)
+        except Exception:
+            pass
+    time.sleep(0.12)
+
+    old = _clipboard_get_text()
+    # A sentinel lets us tell "copied the same text again" from "nothing copied".
+    # It must contain no NUL: the clipboard string would be truncated there.
+    _clipboard_set_text(SENTINEL)
+    try:
+        _send_ctrl_c()
+    except Exception as e:
+        log(f"Ctrl+C failed: {e}")
+        _clipboard_set_text(old if old is not None else "")
+        return None
+
+    deadline = time.time() + timeout
+    got = None
+    while time.time() < deadline:
+        time.sleep(0.05)
+        cur = _clipboard_get_text()
+        if cur and cur != SENTINEL:
+            got = cur
+            break
+
+    _clipboard_set_text(old if old is not None else "")
+    log(f"Selection: {len(got or '')} chars"
+        + ("" if got else " (Ctrl+C produced nothing)"))
+    return (got or "").strip() or None
+
+
+# ── Engines ───────────────────────────────────────────────────────────────────
+
+def _tts_edge(text, voice):
+    """Free Microsoft Edge voices. No API key. Returns path to an mp3."""
+    import asyncio
+    import edge_tts
+
+    out = os.path.join(_tts_cache_dir, f"edge_{abs(hash((text, voice)))}.mp3")
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out
+
+    async def _run():
+        comm = edge_tts.Communicate(text, voice)
+        await comm.save(out)
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_run())
+    finally:
+        loop.close()
+    return out
+
+
+def _vertex_access_token(cred_path):
+    """Refresh-token / service-account -> access token (Vertex, never AI Studio)."""
+    with open(cred_path, encoding='utf-8') as f:
+        cred = json.load(f)
+
+    if cred.get("type") == "authorized_user" or "refresh_token" in cred:
+        body = urllib.parse.urlencode({
+            "client_id":     cred["client_id"],
+            "client_secret": cred["client_secret"],
+            "refresh_token": cred["refresh_token"],
+            "grant_type":    "refresh_token",
+        }).encode()
+        req = urllib.request.Request("https://oauth2.googleapis.com/token",
+                                     data=body, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)["access_token"], cred.get("quota_project_id", "")
+
+    # service_account: signed JWT -> token
+    import base64 as _b64
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+    except ImportError:
+        raise RuntimeError("service-account creds need the 'cryptography' package; "
+                           "use an authorized_user (ADC) json instead")
+
+    def _seg(d):
+        return _b64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=")
+
+    now    = int(time.time())
+    claim  = {"iss": cred["client_email"],
+              "scope": "https://www.googleapis.com/auth/cloud-platform",
+              "aud": "https://oauth2.googleapis.com/token",
+              "iat": now, "exp": now + 3600}
+    signing_input = _seg({"alg": "RS256", "typ": "JWT"}) + b"." + _seg(claim)
+    key = serialization.load_pem_private_key(cred["private_key"].encode(), None)
+    sig = key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+    jwt = signing_input + b"." + _b64.urlsafe_b64encode(sig).rstrip(b"=")
+
+    body = urllib.parse.urlencode({
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion":  jwt.decode(),
+    }).encode()
+    req = urllib.request.Request("https://oauth2.googleapis.com/token",
+                                 data=body, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)["access_token"], cred.get("project_id", "")
+
+
+def _tts_vertex(text, voice, model, style, lang):
+    """Gemini-TTS on Vertex AI. Returns path to a wav."""
+    if not TTS_VERTEX_CRED or not os.path.exists(TTS_VERTEX_CRED):
+        raise RuntimeError("Vertex credential file not set (Settings -> Text to Speech)")
+
+    token, proj = _vertex_access_token(TTS_VERTEX_CRED)
+    project = TTS_VERTEX_PROJECT or proj
+    if not project:
+        raise RuntimeError("Vertex project id not set")
+
+    out = os.path.join(_tts_cache_dir,
+                       f"vx_{abs(hash((text, voice, model, style)))}.wav")
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out
+
+    url = (f"https://aiplatform.googleapis.com/v1/projects/{project}"
+           f"/locations/global/publishers/google/models/{model}:generateContent")
+    prompt = f"{style}\n\n{text}" if style else text
+    body = json.dumps({
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}},
+                "languageCode": f"{lang}-IR" if lang == "fa" else "en-US",
+            },
+        },
+    }).encode()
+    # The preview TTS models intermittently answer 400/503 for input they
+    # accept on the very next try, so a couple of retries beats failing a read.
+    resp = None
+    for attempt in range(3):
+        req = urllib.request.Request(url, data=body, method="POST", headers={
+            "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                resp = json.load(r)
+            break
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:160].replace("\n", " ")
+            if attempt == 2:
+                raise RuntimeError(f"Vertex {e.code}: {detail}") from None
+            log(f"Vertex {e.code}, retrying ({attempt + 1}/2)")
+            time.sleep(1.0 + attempt)
+
+    part = resp["candidates"][0]["content"]["parts"][0]["inlineData"]
+    pcm  = base64.b64decode(part["data"])
+    m    = re.search(r"rate=(\d+)", part.get("mimeType") or "")
+    rate = int(m.group(1)) if m else 24000
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    return out
+
+
+def _edge_voice_for(lang):
+    voice = TTS_EDGE_VOICE
+    # Follow the keyboard layout when the voice does not match the language.
+    if LANG_MODE == "keyboard" and lang == "en" and voice.startswith("fa-"):
+        voice = "en-US-AndrewNeural"
+    return voice
+
+
+def synthesize_tts(text):
+    """text -> (float32 mono samples, samplerate). Engine per settings."""
+    lang = active_language() if LANG_MODE == "keyboard" else LANGUAGE
+    if TTS_ENGINE == "vertex":
+        try:
+            path = _tts_vertex(text, TTS_VERTEX_VOICE, TTS_VERTEX_MODEL,
+                               TTS_STYLE, lang)
+        except Exception as e:
+            # The preview TTS model rejects some perfectly valid Persian input
+            # with a bare 400. Falling back keeps the read going rather than
+            # dropping a chunk of the user's text on the floor.
+            log(f"Vertex TTS failed, falling back to edge: {str(e)[:80]}")
+            path = _tts_edge(text, _edge_voice_for(lang))
+    else:
+        path = _tts_edge(text, _edge_voice_for(lang))
+
+    data, sr = sf.read(path, dtype="float32", always_2d=True)
+    return data.mean(axis=1), sr
+
+
+# ── Chunking for streamed playback ───────────────────────────────────────────
+# Measured 2026-07-21 with edge-tts: Persian ~14-16 chars/s of speech, English
+# ~20, and generating N seconds of audio costs roughly 0.8*N seconds. So a long
+# text is cut into sentence-aligned pieces: a SHORT first piece (audio starts
+# quickly) followed by long ones (the synthesizer keeps a lead over playback).
+
+_RATE_FA, _RATE_EN = 14.0, 20.0
+
+
+def _chars_per_sec(text):
+    head = text[:400]
+    arabic = sum(1 for c in head if '؀' <= c <= 'ۿ')
+    return _RATE_FA if arabic > len(head) * 0.15 else _RATE_EN
+
+
+def _split_long(sent, target):
+    """Cut an over-long sentence at the last comma (else space) before target."""
+    window = sent[:int(target * 1.2)]
+    for seps in ("،,؛;", " "):
+        idx = max((window.rfind(c) for c in seps), default=-1)
+        if idx > target * 0.4:
+            return sent[:idx + 1], sent[idx + 1:].lstrip()
+    return sent[:target], sent[target:].lstrip()
+
+
+def _split_for_streaming(text, first_secs, chunk_secs):
+    """Sentence-aligned chunks sized by speaking TIME rather than characters."""
+    rate = _chars_per_sec(text)
+    first_target, target = max(40, int(first_secs * rate)), max(80, int(chunk_secs * rate))
+
+    sentences = [s for s in re.split(r"(?<=[.!?؟۔:;؛\n])\s+", text)
+                 if s.strip()]
+
+    parts, cur, limit = [], "", first_target
+    for sent in sentences:
+        while len(sent) > target * 1.6:
+            head, sent = _split_long(sent, target)
+            cur = (cur + " " + head).strip()
+            parts.append(cur)
+            cur, limit = "", target
+        if cur and len(cur) + len(sent) + 1 > limit:
+            parts.append(cur)
+            cur, limit = sent, target
+        else:
+            cur = (cur + " " + sent).strip()
+        if len(cur) >= limit:
+            parts.append(cur)
+            cur, limit = "", target
+    if cur.strip():
+        parts.append(cur.strip())
+    return parts or [text]
+
+
+# ── Playback (pitch-preserving speed, seek, pause) ────────────────────────────
+
+def _time_stretch(x, rate, sr):
+    """WSOLA time-stretch: changes tempo without changing pitch."""
+    if abs(rate - 1.0) < 0.02 or len(x) < sr // 10:
+        return x
+    frame   = max(256, int(sr * 0.03))
+    hop_out = frame // 2
+    hop_in  = max(1, int(round(hop_out * rate)))
+    search  = max(1, int(sr * 0.004))
+    win     = np.hanning(frame).astype(np.float32)
+
+    n_out = int(len(x) / rate) + 2 * frame
+    out   = np.zeros(n_out, dtype=np.float32)
+    norm  = np.zeros(n_out, dtype=np.float32)
+
+    # `ideal` advances deterministically by hop_in; the similarity search only
+    # picks WHICH nearby frame to copy. Advancing from the searched position
+    # instead would let the offset accumulate and skew the output length.
+    ideal = write = 0
+    tail = None
+    while ideal + frame < len(x) and write + frame < n_out:
+        pos = ideal
+        if tail is not None:
+            lo   = max(0, ideal - search)
+            hi   = min(len(x) - frame, ideal + search)
+            best, best_score = ideal, -1e30
+            for cand in range(lo, hi + 1, 8):
+                seg = x[cand:cand + len(tail)]
+                if len(seg) < len(tail):
+                    break
+                score = float(np.dot(seg, tail))
+                if score > best_score:
+                    best_score, best = score, cand
+            pos = best
+        seg = x[pos:pos + frame]
+        if len(seg) < frame:
+            break
+        out[write:write + frame]  += seg * win
+        norm[write:write + frame] += win
+        tail   = x[pos + hop_out:pos + frame]
+        write += hop_out
+        ideal += hop_in
+
+    end = write + frame
+    norm[norm < 1e-6] = 1.0
+    return (out[:end] / norm[:end]).astype(np.float32)
+
+
+class TtsPlayer:
+    """Single-clip player with pause/resume, seek and live pitch-safe speed."""
+
+    def __init__(self):
+        self._lock   = threading.Lock()
+        self._base   = None      # as decoded (concatenated)
+        self._parts  = []        # per-chunk decoded audio, for re-stretching
+        self._bounds = []        # sample offset of each chunk inside _audio
+        self._audio  = None      # speed-adjusted
+        self._sr     = 24000
+        self._pos    = 0
+        self._speed  = 1.0
+        self._stream = None
+        self.playing = False
+        self.ended   = False
+        self.ended_at = None
+        self.complete = True     # False while more chunks are still coming
+        self.buffering = False   # ran dry but the text is not finished
+        self.cancelled = False   # user stopped: producers should give up
+
+    # -- internals
+    def _callback(self, outdata, frames, time_info, status):
+        with self._lock:
+            if self._audio is None or not self.playing:
+                outdata[:] = 0
+                return
+            chunk = self._audio[self._pos:self._pos + frames]
+            n = len(chunk)
+            outdata[:n, 0] = chunk
+            if n < frames:
+                outdata[n:] = 0
+                self._pos = len(self._audio)
+                if self.complete:
+                    self.playing = False
+                    self.ended = True
+                    self.ended_at = time.time()
+                else:
+                    # Out of audio but more is being synthesized: hold the
+                    # stream open and play silence until the next chunk lands.
+                    self.buffering = True
+            else:
+                self._pos += frames
+                self.buffering = False
+
+    def _ensure_stream(self):
+        if self._stream is not None:
+            return
+        self._stream = sd.OutputStream(samplerate=self._sr, channels=1,
+                                       dtype="float32", callback=self._callback,
+                                       blocksize=1024)
+        self._stream.start()
+
+    def _rebuild(self, keep_fraction=None):
+        # Each chunk is stretched on its own and the results concatenated, so
+        # appending a new chunk never re-processes what is already playing.
+        stretched = [_time_stretch(p, self._speed, self._sr) for p in self._parts]
+        self._audio = (np.concatenate(stretched) if stretched
+                       else np.zeros(0, dtype=np.float32))
+        # Sample offset where each chunk starts, for chunk-to-chunk navigation.
+        self._bounds, off = [], 0
+        for s in stretched:
+            self._bounds.append(off)
+            off += len(s)
+        if keep_fraction is not None and len(self._audio):
+            self._pos = min(len(self._audio) - 1,
+                            max(0, int(keep_fraction * len(self._audio))))
+
+    # -- public
+    def load(self, samples, sr, complete=True):
+        """Start a new clip. complete=False means more chunks will be appended."""
+        with self._lock:
+            was = self._stream
+            self._stream = None
+        if was is not None:
+            try:
+                was.stop(); was.close()
+            except Exception:
+                pass
+        with self._lock:
+            self._parts = [samples]
+            self._base = samples
+            self._sr   = sr
+            self._pos  = 0
+            self.ended = False
+            self.ended_at = None
+            self.complete = complete
+            self.buffering = False
+            self.cancelled = False
+            self._rebuild()
+        self._ensure_stream()
+        with self._lock:
+            self.playing = True
+
+    def append(self, samples):
+        """Add the next chunk of a streamed read; playback continues seamlessly."""
+        with self._lock:
+            if self._audio is None:
+                return
+            self._parts.append(samples)
+            self._base = np.concatenate([self._base, samples])
+            self._bounds.append(len(self._audio))
+            self._audio = np.concatenate(
+                [self._audio, _time_stretch(samples, self._speed, self._sr)])
+            self.buffering = False
+            if self.ended:          # drained before this chunk arrived
+                self.ended = False
+                self.ended_at = None
+                self.playing = True
+
+    def finish(self):
+        """No more chunks are coming."""
+        with self._lock:
+            self.complete = True
+            if self._audio is not None and self._pos >= len(self._audio):
+                self.playing = False
+                self.ended = True
+                self.ended_at = time.time()
+
+    def toggle(self):
+        with self._lock:
+            if self._audio is None:
+                return
+            if self.ended:
+                self._pos = 0
+                self.ended = False
+                self.ended_at = None
+            self.playing = not self.playing
+
+    def stop(self):
+        with self._lock:
+            self.playing = False
+            self._pos = 0
+            # Stop paying to synthesize text the user has abandoned.
+            if not self.complete:
+                self.cancelled = True
+
+    def close(self):
+        with self._lock:
+            self.playing = False
+            st, self._stream = self._stream, None
+        if st is not None:
+            try:
+                st.stop(); st.close()
+            except Exception:
+                pass
+
+    def seek(self, fraction):
+        with self._lock:
+            if self._audio is None:
+                return
+            self._pos = min(len(self._audio) - 1,
+                            max(0, int(fraction * len(self._audio))))
+            if self.ended and self._pos < len(self._audio) - 1:
+                self.ended = False
+                self.ended_at = None
+
+    def set_speed(self, speed):
+        with self._lock:
+            if self._base is None or abs(speed - self._speed) < 0.01:
+                self._speed = speed
+                return
+            have = self._audio is not None and len(self._audio) > 0
+            frac = (self._pos / len(self._audio)) if have else 0.0
+            self._speed = speed
+            self._rebuild(keep_fraction=frac)
+
+    def position(self):
+        with self._lock:
+            if self._audio is None or not len(self._audio):
+                return 0.0, 0.0
+            return self._pos / self._sr, len(self._audio) / self._sr
+
+    # -- chunk navigation
+    def chunk_state(self):
+        """(current chunk number, total chunks, boundary fractions 0..1)."""
+        with self._lock:
+            if not self._bounds or self._audio is None or not len(self._audio):
+                return 0, 0, []
+            total = len(self._bounds)
+            idx = 0
+            for i, b in enumerate(self._bounds):
+                if self._pos >= b:
+                    idx = i
+            return idx + 1, total, [b / len(self._audio) for b in self._bounds]
+
+    def jump_chunk(self, delta):
+        """Skip to another chunk. Going back mid-chunk restarts the current one
+        first, the way every media player behaves."""
+        with self._lock:
+            if not self._bounds or self._audio is None:
+                return
+            idx = 0
+            for i, b in enumerate(self._bounds):
+                if self._pos >= b:
+                    idx = i
+            if delta < 0 and (self._pos - self._bounds[idx]) > 3 * self._sr:
+                target = idx          # >3s in: restart this chunk instead
+            else:
+                target = max(0, min(len(self._bounds) - 1, idx + delta))
+            self._pos = self._bounds[target]
+            if self.ended:
+                self.ended = False
+                self.ended_at = None
+                self.playing = True
+
+    def remaining_seconds(self):
+        """Audio still buffered ahead of the play head - the synthesizer's lead."""
+        with self._lock:
+            if self._audio is None:
+                return 0.0
+            return max(0, len(self._audio) - self._pos) / self._sr
+
+
+def _close_tts_popup_if_idle():
+    """Close the popup if it is only showing a message (nothing is playing)."""
+    if _tts_popup and not (_tts_player and _tts_player.playing):
+        try:
+            _ui_run(_tts_popup["win"].destroy)
+        except Exception:
+            pass
+        globals()["_tts_popup"] = None
+
+
+def _get_player():
+    global _tts_player
+    if _tts_player is None:
+        _tts_player = TtsPlayer()
+    return _tts_player
+
+
+def speak_text(text):
+    """Synthesize and play `text`.
+
+    Long text is streamed: the first (short) chunk starts playing as soon as it
+    is ready and the remaining chunks are synthesized in the background while
+    earlier ones play, so there is no silent wait for the whole text and no gap
+    between chunks.
+    """
+    global _tts_busy, _tts_last_text, _tts_progress
+    if _tts_busy:
+        log("TTS busy, ignoring")
+        return
+    _tts_busy = True
+    _tts_last_text = text
+    player = _get_player()
+    try:
+        if tray_icon:
+            tray_icon.icon = create_icon("recording")
+
+        parts = _split_for_streaming(text, TTS_FIRST_CHUNK_SECS, TTS_CHUNK_SECS)
+        _tts_progress = (0, len(parts))
+        if TTS_POPUP:
+            open_tts_popup(status=f"Generating 1/{len(parts)}...")
+
+        t0 = time.time()
+        samples, sr = synthesize_tts(parts[0])
+        first_gen = time.time() - t0
+        player.load(samples, sr, complete=(len(parts) == 1))
+        player.set_speed(TTS_SPEED)
+        _tts_progress = (1, len(parts))
+        log(f"TTS {TTS_ENGINE} chunk 1/{len(parts)} "
+            f"({len(parts[0])} chars) in {first_gen:.1f}s - playing")
+        if TTS_POPUP:
+            open_tts_popup(status="")
+
+        _history.appendleft({
+            "time":   datetime.datetime.now().strftime("%H:%M:%S"),
+            "engine": f"tts:{TTS_ENGINE}",
+            "stt":    None,
+            "output": text,
+        })
+        save_history()
+
+        if len(parts) > 1:
+            threading.Thread(target=_stream_rest, args=(parts, player),
+                             daemon=True).start()
+            return          # _stream_rest owns _tts_busy from here
+    except Exception as e:
+        log(f"TTS error: {e}")
+        if TTS_POPUP:
+            open_tts_popup(status=f"Error: {e}")
+    _tts_busy = False
+    if tray_icon:
+        tray_icon.icon = create_icon("idle")
+
+
+TTS_LOOKAHEAD = 3      # chunks synthesized concurrently
+TTS_MAX_LEAD  = 45.0   # seconds of ready audio to keep ahead of the play head
+
+
+def _stream_rest(parts, player):
+    """Synthesize chunks 2..N while earlier ones play.
+
+    Several chunks are generated CONCURRENTLY - generating a chunk can take
+    longer than it takes to speak it, so a strictly sequential producer falls
+    behind and the player stalls between chunks. Results are still appended in
+    order, so playback stays correct.
+    """
+    global _tts_busy, _tts_progress
+    from concurrent.futures import ThreadPoolExecutor
+
+    total = len(parts)
+    ready, order_lock, next_idx = {}, threading.Lock(), [1]
+    pending  = [0.0]       # seconds synthesized but not yet appended
+    inflight = [0.0]       # estimated seconds currently being synthesized
+    cancelled = threading.Event()
+
+    def _flush_ready():
+        """Append every consecutive finished chunk, keeping playback in order."""
+        while next_idx[0] in ready:
+            samples, sr = ready.pop(next_idx[0])
+            if samples is not None:
+                pending[0] = max(0.0, pending[0] - len(samples) / sr)
+                player.append(samples)
+            next_idx[0] += 1
+            _tts_progress = (next_idx[0], total)
+
+    def _lead():
+        """Audio already paid for and not yet heard: appended + finished-but-
+        queued + currently being generated. Counting in-flight work is what
+        keeps N concurrent workers from all clearing the gate and overshooting.
+        """
+        with order_lock:
+            return player.remaining_seconds() + pending[0] + inflight[0]
+
+    def _work(i):
+        # Stay ahead of playback, but not further than TTS_MAX_LEAD: audio the
+        # user may never reach still costs time and (on Vertex) money.
+        est = len(parts[i]) / _chars_per_sec(parts[i])
+        while (not cancelled.is_set() and not player.cancelled
+               and _lead() > TTS_MAX_LEAD):
+            time.sleep(0.4)
+        if cancelled.is_set() or player.cancelled:
+            return
+        with order_lock:
+            inflight[0] += est
+        t0 = time.time()
+        try:
+            samples, sr = synthesize_tts(parts[i])
+        except Exception as e:
+            log(f"TTS chunk {i + 1}/{total} failed, skipping: {str(e)[:70]}")
+            samples, sr = None, 24000
+        with order_lock:
+            inflight[0] = max(0.0, inflight[0] - est)
+            ready[i] = (samples, sr)
+            if samples is not None:
+                pending[0] += len(samples) / sr
+            _flush_ready()
+        if samples is not None:
+            log(f"TTS chunk {i + 1}/{total} in {time.time() - t0:.1f}s "
+                f"(buffer ahead: {_lead():.0f}s)")
+
+    try:
+        with ThreadPoolExecutor(max_workers=TTS_LOOKAHEAD) as pool:
+            futures = [pool.submit(_work, i) for i in range(1, total)]
+            while any(not f.done() for f in futures):
+                if player.cancelled or (player.ended and player.complete):
+                    cancelled.set()
+                    log("TTS stream cancelled - remaining chunks skipped")
+                    break
+                time.sleep(0.2)
+    except Exception as e:
+        log(f"TTS stream error: {e}")
+    finally:
+        with order_lock:
+            _flush_ready()
+        player.finish()
+        _tts_busy = False
+        if tray_icon:
+            tray_icon.icon = create_icon("idle")
+
+
+# ── Popup control widget ─────────────────────────────────────────────────────
+
+def open_tts_popup(status=""):
+    """Small always-on-top player widget; self-closes after playback."""
+
+    def _build():
+        global _tts_popup
+
+        if _tts_popup and _tts_popup["win"].winfo_exists():
+            if status:
+                _tts_popup["status"].config(text=status)
+            elif _tts_popup["status"].cget("text").startswith(("Generating", "Error")):
+                _tts_popup["status"].config(text="")
+            _tts_popup["win"].lift()
+            return
+
+        BG, CARD, DIM, FG   = "#181818", "#202020", "#7a7a7a", "#e8e8e8"
+        TRACK, ACCENT       = "#3a3a3a", "#4c9aff"
+        W, H                = 348, 92
+        SEEK_W, SPEED_W     = 324, 120
+
+        win = tk.Toplevel(_ui_root)
+        win.withdraw()
+        win.overrideredirect(True)          # no title bar - it dwarfed the content
+        win.attributes("-topmost", True)
+        win.attributes("-alpha", 0.0)       # fade in; avoids the open-flash
+        win.configure(bg=TRACK)             # 1px hairline border
+
+        card = tk.Frame(win, bg=BG)
+        card.pack(fill="both", expand=True, padx=1, pady=1)
+        pad = tk.Frame(card, bg=BG, padx=12, pady=9)
+        pad.pack(fill="both", expand=True)
+
+        # ── top row: transport, time, status, close ──────────────────────────
+        top = tk.Frame(pad, bg=BG)
+        top.pack(fill="x")
+
+        def _icon_btn(parent, glyph, size=12):
+            b = tk.Label(parent, text=glyph, bg=BG, fg=FG,
+                         font=("Segoe UI Symbol", size), cursor="hand2")
+            b.bind("<Enter>", lambda e: b.config(fg="#ffffff"))
+            b.bind("<Leave>", lambda e: b.config(fg=FG))
+            return b
+
+        prev_btn = _icon_btn(top, "◀◀", 10)
+        prev_btn.pack(side="left", padx=(0, 8))
+        play_btn = _icon_btn(top, "❚❚")
+        play_btn.pack(side="left")
+        next_btn = _icon_btn(top, "▶▶", 10)
+        next_btn.pack(side="left", padx=(8, 0))
+        stop_btn = _icon_btn(top, "■", 11)
+        stop_btn.pack(side="left", padx=(10, 12))
+
+        time_lbl = tk.Label(top, text="0:00 / 0:00", bg=BG, fg=DIM,
+                            font=("Segoe UI", 8))
+        time_lbl.pack(side="left")
+
+        chunk_lbl = tk.Label(top, text="", bg=BG, fg="#5f5f5f",
+                             font=("Segoe UI", 8))
+        chunk_lbl.pack(side="left", padx=(8, 0))
+
+        close_btn = tk.Label(top, text="✕", bg=BG, fg="#5a5a5a",
+                             font=("Segoe UI", 9), cursor="hand2")
+        close_btn.pack(side="right")
+        close_btn.bind("<Enter>", lambda e: close_btn.config(fg="#ff6b6b"))
+        close_btn.bind("<Leave>", lambda e: close_btn.config(fg="#5a5a5a"))
+
+        status_lbl = tk.Label(top, text=status, bg=BG, fg="#cca700",
+                              font=("Segoe UI", 8))
+        status_lbl.pack(side="right", padx=(0, 10))
+
+        # ── canvas sliders: thin, rounded, no chunky tk.Scale chrome ─────────
+        def _bar(parent, width, height=14):
+            return tk.Canvas(parent, width=width, height=height, bg=BG,
+                             highlightthickness=0, bd=0, cursor="hand2")
+
+        def _draw(cv, width, frac, active=True, marks=()):
+            cv.delete("all")
+            y, x0, x1 = 7, 5, width - 5
+            cv.create_line(x0, y, x1, y, fill=TRACK, width=3, capstyle="round")
+            x = x0 + (x1 - x0) * max(0.0, min(1.0, frac))
+            col = ACCENT if active else "#5a5a5a"
+            if x > x0:
+                cv.create_line(x0, y, x, y, fill=col, width=3, capstyle="round")
+            # chunk boundaries, so the split is visible rather than guessed at
+            for m in marks:
+                if m <= 0:
+                    continue
+                mx = x0 + (x1 - x0) * m
+                cv.create_line(mx, y - 4, mx, y + 4, fill="#7a7a7a", width=1)
+            cv.create_oval(x - 4, y - 4, x + 4, y + 4, fill=col, outline="")
+
+        seek_cv = _bar(pad, SEEK_W)
+        seek_cv.pack(fill="x", pady=(9, 0))
+
+        srow = tk.Frame(pad, bg=BG)
+        srow.pack(fill="x", pady=(6, 0))
+        tk.Label(srow, text="Speed", bg=BG, fg=DIM,
+                 font=("Segoe UI", 8)).pack(side="left")
+        speed_val = tk.Label(srow, text=f"{TTS_SPEED:.2f}x", bg=BG, fg=DIM,
+                             font=("Segoe UI", 8), width=5, anchor="e")
+        speed_val.pack(side="right")
+        speed_cv = _bar(srow, SPEED_W)
+        speed_cv.pack(side="left", padx=(8, 6))
+
+        state = {"seeking": False, "closed": False, "frac": 0.0}
+
+        def _fmt(s):
+            return f"{int(s // 60)}:{int(s % 60):02d}"
+
+        def _frac_at(event, width):
+            return max(0.0, min(1.0, (event.x - 5) / max(1, width - 10)))
+
+        # seek: drag freely, commit on release
+        def _seek_drag(e):
+            state["seeking"] = True
+            state["frac"] = _frac_at(e, SEEK_W)
+            _draw(seek_cv, SEEK_W, state["frac"])
+            _, dur = _get_player().position()
+            if dur:
+                time_lbl.config(text=f"{_fmt(state['frac'] * dur)} / {_fmt(dur)}")
+
+        def _seek_commit(e):
+            _get_player().seek(_frac_at(e, SEEK_W))
+            state["seeking"] = False
+
+        seek_cv.bind("<Button-1>", _seek_drag)
+        seek_cv.bind("<B1-Motion>", _seek_drag)
+        seek_cv.bind("<ButtonRelease-1>", _seek_commit)
+
+        # speed: 0.5x .. 2.0x, applied live
+        def _speed_set(e):
+            global TTS_SPEED
+            v = round(0.5 + _frac_at(e, SPEED_W) * 1.5, 2)
+            TTS_SPEED = v
+            speed_val.config(text=f"{v:.2f}x")
+            _draw(speed_cv, SPEED_W, (v - 0.5) / 1.5)
+            threading.Thread(target=lambda: _get_player().set_speed(v),
+                             daemon=True).start()
+
+        speed_cv.bind("<Button-1>", _speed_set)
+        speed_cv.bind("<B1-Motion>", _speed_set)
+
+        _draw(seek_cv, SEEK_W, 0.0)
+        _draw(speed_cv, SPEED_W, (TTS_SPEED - 0.5) / 1.5)
+
+        # ── drag the whole widget by its background ──────────────────────────
+        drag = {"x": 0, "y": 0}
+
+        def _drag_start(e):
+            drag["x"], drag["y"] = e.x_root - win.winfo_x(), e.y_root - win.winfo_y()
+
+        def _drag_move(e):
+            win.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
+
+        for w_ in (card, pad, top, srow, time_lbl, status_lbl):
+            w_.bind("<Button-1>", _drag_start)
+            w_.bind("<B1-Motion>", _drag_move)
+
+        def _close():
+            global _tts_popup
+            state["closed"] = True
+            _tts_popup = None
+            try:
+                _get_player().stop()
+            except Exception:
+                pass
+            win.destroy()
+
+        def _toggle(_e=None):
+            _get_player().toggle()
+            play_btn.config(text="❚❚" if _get_player().playing else "▶")
+
+        def _stop(_e=None):
+            _get_player().stop()
+            play_btn.config(text="▶")
+
+        def _prev(_e=None):
+            _get_player().jump_chunk(-1)
+
+        def _next(_e=None):
+            _get_player().jump_chunk(+1)
+
+        play_btn.bind("<Button-1>", _toggle)
+        stop_btn.bind("<Button-1>", _stop)
+        prev_btn.bind("<Button-1>", _prev)
+        next_btn.bind("<Button-1>", _next)
+        close_btn.bind("<Button-1>", lambda e: _close())
+        win.bind("<Escape>", lambda e: _close())
+
+        def _tick():
+            if state["closed"] or not win.winfo_exists():
+                return
+            p = _get_player()
+            cur, dur = p.position()
+            idx, total, marks = p.chunk_state()
+            if not state["seeking"]:
+                time_lbl.config(text=f"{_fmt(cur)} / {_fmt(dur)}"
+                                     + ("+" if not p.complete else ""))
+                _draw(seek_cv, SEEK_W, (cur / dur) if dur else 0.0, p.playing,
+                      marks if total > 1 else ())
+            play_btn.config(text="❚❚" if p.playing else "▶")
+            # chunk counter + grey out the arrows at the ends
+            chunk_lbl.config(text=f"part {idx}/{total}" if total > 1 else "")
+            prev_btn.config(fg=FG if total > 1 else "#3a3a3a")
+            next_btn.config(fg=FG if (total > 1 and idx < total) else "#3a3a3a")
+            # while streaming, show which chunk is being synthesized
+            done, total = _tts_progress
+            if not p.complete and total > 1:
+                status_lbl.config(text=f"{done}/{total}"
+                                       + ("  buffering" if p.buffering else ""))
+            elif status_lbl.cget("text") and "/" in status_lbl.cget("text"):
+                status_lbl.config(text="")
+            if (TTS_POPUP_AUTOCLOSE and p.ended and p.ended_at
+                    and time.time() - p.ended_at > TTS_POPUP_AUTOCLOSE):
+                _close()
+                return
+            win.after(200, _tick)
+
+        # Fixed size and final position BEFORE mapping, so it never jumps.
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"{W}x{H}+{sw - W - 24}+{sh - H - 72}")
+        win.update_idletasks()
+        win.deiconify()
+
+        def _fade(a=0.0):
+            if state["closed"] or not win.winfo_exists():
+                return
+            a = min(0.97, a + 0.13)
+            win.attributes("-alpha", a)
+            if a < 0.97:
+                win.after(16, lambda: _fade(a))
+
+        _fade()
+        _tts_popup = {"win": win, "status": status_lbl}
+        _tick()
+
+    _ui_run(_build)
+
+
+def on_tts_hotkey():
+    """Read the current selection aloud (fired on hotkey release)."""
+    if not TTS_ENABLED:
+        return
+    text = get_selected_text()
+    if not text:
+        # Silence here reads as "the hotkey is broken" - say what happened.
+        log("TTS: no text selected")
+        if TTS_POPUP:
+            open_tts_popup(status="No text selected")
+            threading.Timer(2.5, _close_tts_popup_if_idle).start()
+        return
+    if len(text) > 8000:
+        text = text[:8000]
+    speak_text(text)
+
+
+def speak_clipboard(icon=None, item=None):
+    """Tray action: read whatever is on the clipboard."""
+    text = (_clipboard_get_text() or "").strip()
+    if text:
+        threading.Thread(target=speak_text, args=(text,), daemon=True).start()
+    else:
+        log("TTS: clipboard empty")
+
+
 # ─── Hotkey Handlers ──────────────────────────────────────────────────────────
 
 def on_hotkey_press():
@@ -785,6 +2012,8 @@ def on_hotkey_release():
         path = _stop_recording()
         if STT_ENGINE == "google":
             raw = _transcribe_google_direct(path) if path else None
+        elif STT_ENGINE == "gemini":
+            raw = _transcribe_gemini(path) if path else None
         elif STT_ENGINE == "google-cloud":
             raw = _transcribe_google_cloud(path) if path else None
         else:  # groq
@@ -806,11 +2035,41 @@ def on_hotkey_release():
 
 
 def keyboard_listener():
-    global running, is_hotkey_active
-    keys = HOTKEY.split('+')
+    global running, is_hotkey_active, is_tts_hotkey_active
+    stt_blocked = False   # set after a TTS trigger, cleared once STT keys are up
     while running:
         try:
+            # The TTS combo may share modifiers with the STT one, so check it
+            # first and keep STT muted while it is held.
+            tts_keys = TTS_HOTKEY.split('+') if (TTS_ENABLED and TTS_HOTKEY) else []
+            tts_down = bool(tts_keys) and all(keyboard.is_pressed(k) for k in tts_keys)
+
+            if tts_down and not is_tts_hotkey_active:
+                is_tts_hotkey_active = True
+                log(f"TTS hotkey down ({TTS_HOTKEY})")
+                if is_hotkey_active:      # STT started first: cancel it silently
+                    is_hotkey_active = False
+                    _cancel_recording()
+            elif not tts_down and is_tts_hotkey_active:
+                is_tts_hotkey_active = False
+                log("TTS hotkey released - reading selection")
+                # Letting go of ctrl first leaves win+alt down, which would look
+                # like a fresh voice-typing press - block STT until it is released.
+                stt_blocked = True
+                threading.Thread(target=on_tts_hotkey, daemon=True).start()
+
+            if is_tts_hotkey_active:
+                time.sleep(0.05)
+                continue
+
+            keys = HOTKEY.split('+')
             pressed = all(keyboard.is_pressed(k) for k in keys)
+            if stt_blocked:
+                if not pressed:
+                    stt_blocked = False
+                time.sleep(0.05)
+                continue
+
             if pressed and not is_hotkey_active:
                 is_hotkey_active = True
                 on_hotkey_press()
@@ -857,6 +2116,10 @@ def _apply_settings(new_cfg):
     global STT_ENGINE, PROMPT_MODE, HOTKEY, LANGUAGE, MIC_MODE, GROQ_API_KEY, MODEL, WS_PORT, CHECK_UPDATES
     global GOOGLE_CLOUD_API_KEY
     global GEMINI_API_KEY, GEMINI_SYSTEM_PROMPT, LANG_MODE, GEMINI_THINKING_LEVEL, GEMINI_MEDIA_RESOLUTION
+    global GEMINI_STT_MODEL
+    global TTS_ENABLED, TTS_HOTKEY, TTS_ENGINE, TTS_EDGE_VOICE, TTS_VERTEX_VOICE
+    global TTS_VERTEX_MODEL, TTS_VERTEX_CRED, TTS_VERTEX_PROJECT, TTS_STYLE
+    global TTS_SPEED, TTS_POPUP, TTS_POPUP_AUTOCLOSE, TTS_CHUNK_SECS, TTS_FIRST_CHUNK_SECS
 
     old_mic    = MIC_MODE
     old_engine = STT_ENGINE
@@ -876,6 +2139,22 @@ def _apply_settings(new_cfg):
     LANG_MODE               = new_cfg.get("lang_mode", "fixed")
     GEMINI_THINKING_LEVEL   = new_cfg.get("gemini_thinking_level", "LOW")
     GEMINI_MEDIA_RESOLUTION = new_cfg.get("gemini_media_resolution", "LOW")
+    GEMINI_STT_MODEL        = new_cfg.get("gemini_stt_model", GEMINI_STT_DEFAULT_MODEL)
+
+    TTS_ENABLED         = new_cfg.get("tts_enabled", True)
+    TTS_HOTKEY          = new_cfg.get("tts_hotkey", "win+shift")
+    TTS_ENGINE          = new_cfg.get("tts_engine", "edge")
+    TTS_EDGE_VOICE      = new_cfg.get("tts_edge_voice", "fa-IR-FaridNeural")
+    TTS_VERTEX_VOICE    = new_cfg.get("tts_vertex_voice", "Zubenelgenubi")
+    TTS_VERTEX_MODEL    = new_cfg.get("tts_vertex_model", "gemini-3.1-flash-tts-preview")
+    TTS_VERTEX_CRED     = new_cfg.get("tts_vertex_cred", "")
+    TTS_VERTEX_PROJECT  = new_cfg.get("tts_vertex_project", "")
+    TTS_STYLE           = new_cfg.get("tts_style", TTS_DEFAULT_STYLE)
+    TTS_SPEED           = float(new_cfg.get("tts_speed", 1.0))
+    TTS_POPUP           = new_cfg.get("tts_popup", True)
+    TTS_POPUP_AUTOCLOSE = int(new_cfg.get("tts_popup_autoclose", 30))
+    TTS_CHUNK_SECS       = float(new_cfg.get("tts_chunk_secs", 25))
+    TTS_FIRST_CHUNK_SECS = float(new_cfg.get("tts_first_chunk_secs", 8))
 
     # Apply mic mode change live
     if audio_stream and old_mic != MIC_MODE:
@@ -912,34 +2191,61 @@ def open_settings(icon=None, item=None):
         win.resizable(False, True)
         win.configure(bg="#1e1e1e")
 
-        # ── Scrollable body ──────────────────────────────────────────────────
-        canvas = tk.Canvas(win, bg="#1e1e1e", highlightthickness=0, bd=0)
-        scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
+        # ── Tabs ─────────────────────────────────────────────────────────────
+        # ttk on Windows ignores most colour options unless the theme is 'clam'.
+        style = ttk.Style(win)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("Dark.TNotebook", background="#1e1e1e", borderwidth=0,
+                        tabmargins=(8, 6, 8, 0))
+        style.configure("Dark.TNotebook.Tab", background="#252525", foreground="#999999",
+                        padding=(16, 7), borderwidth=0, font=("Segoe UI", 9))
+        style.map("Dark.TNotebook.Tab",
+                  background=[("selected", "#1e1e1e")],
+                  foreground=[("selected", "#ffffff")],
+                  expand=[("selected", (0, 0, 0, 2))])
 
-        body = tk.Frame(canvas, bg="#1e1e1e", padx=20, pady=16)
-        body_id = canvas.create_window((0, 0), window=body, anchor="nw")
+        nb = ttk.Notebook(win, style="Dark.TNotebook")
+        nb.pack(side="top", fill="both", expand=True)
 
-        def _on_body_configure(e):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfig(body_id, width=canvas.winfo_width())
-        body.bind("<Configure>", _on_body_configure)
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(body_id, width=e.width))
+        def _make_tab(title):
+            """A scrollable dark page inside the notebook. Returns its body frame."""
+            page = tk.Frame(nb, bg="#1e1e1e")
+            nb.add(page, text=title)
+            cv = tk.Canvas(page, bg="#1e1e1e", highlightthickness=0, bd=0)
+            sb = tk.Scrollbar(page, orient="vertical", command=cv.yview)
+            cv.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            cv.pack(side="left", fill="both", expand=True)
+            inner = tk.Frame(cv, bg="#1e1e1e", padx=20, pady=10)
+            iid = cv.create_window((0, 0), window=inner, anchor="nw")
+            inner.bind("<Configure>",
+                       lambda e: cv.configure(scrollregion=cv.bbox("all")))
+            cv.bind("<Configure>", lambda e: cv.itemconfig(iid, width=e.width))
+            cv.bind("<MouseWheel>",
+                    lambda e: cv.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+            inner.bind("<MouseWheel>",
+                       lambda e: cv.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+            return inner
 
-        def _on_mousewheel(e):
-            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        win.bind("<MouseWheel>", _on_mousewheel)
+        tab_stt = _make_tab("  Speech → Text  ")
+        tab_tts = _make_tab("  Text → Speech  ")
+        tab_gen = _make_tab("  General  ")
+
+        # `body` stays the name the STT/prompt widgets below are built into.
+        body = tab_stt
 
         lbl_style = {"bg": "#1e1e1e", "fg": "#cccccc", "font": ("Segoe UI", 9)}
         hdr_style = {"bg": "#1e1e1e", "fg": "#ffffff", "font": ("Segoe UI", 9, "bold")}
         ent_style = {"bg": "#2d2d2d", "fg": "#ffffff", "insertbackground": "#ffffff",
                      "relief": "flat", "font": ("Segoe UI", 9)}
 
-        def section(text):
-            tk.Label(body, text=text, **hdr_style).pack(anchor="w", pady=(12, 2))
-            ttk.Separator(body).pack(fill="x", pady=(0, 6))
+        def section(text, parent=None):
+            p = parent if parent is not None else body
+            tk.Label(p, text=text, **hdr_style).pack(anchor="w", pady=(12, 2))
+            ttk.Separator(p).pack(fill="x", pady=(0, 6))
 
         rb_cfg = dict(bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
                       activebackground="#1e1e1e", activeforeground="#ffffff",
@@ -955,6 +2261,7 @@ def open_settings(icon=None, item=None):
         stt_radios = []
         for label, val in [
                 ("Google  —  free, unofficial, no key",         "google"),
+                ("Gemini  —  detects the language itself, no language setting", "gemini"),
                 ("Google Cloud  —  official, API key required", "google-cloud"),
                 ("Groq Whisper  —  API key required",           "groq"),
                 ("Google Extension  —  Chrome in background",   "google-ext")]:
@@ -995,6 +2302,23 @@ def open_settings(icon=None, item=None):
                  text="console.cloud.google.com → Speech-to-Text API → Credentials",
                  bg="#252525", fg="#666666", font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
 
+        # Gemini STT sub-frame
+        gstt_frame = tk.Frame(stt_extra, bg="#252525", padx=12, pady=6)
+        row_gm = tk.Frame(gstt_frame, bg="#252525")
+        row_gm.pack(fill="x", pady=2)
+        tk.Label(row_gm, text="Model:", width=14, anchor="w",
+                 bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(side="left")
+        gstt_model_var = tk.StringVar(value=GEMINI_STT_MODEL)
+        tk.Entry(row_gm, textvariable=gstt_model_var, width=34,
+                 **{**ent_style, "bg": "#333333"}).pack(side="left")
+        tk.Label(gstt_frame,
+                 text=("The model detects the spoken language itself - the Language "
+                       "setting and keyboard layout are ignored.\nEnglish words inside "
+                       "Persian speech stay in English. Uses the Vertex credential from "
+                       "the Text → Speech tab,\nfalling back to the Gemini API key below."),
+                 justify="left",
+                 bg="#252525", fg="#666666", font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+
         def _refresh_stt_extra(*_):
             eng = stt_var.get()
             for child in stt_extra.winfo_children():
@@ -1005,6 +2329,9 @@ def open_settings(icon=None, item=None):
             elif eng == "google-cloud":
                 stt_extra.configure(bg="#252525")
                 gcloud_frame.pack(fill="x")
+            elif eng == "gemini":
+                stt_extra.configure(bg="#252525")
+                gstt_frame.pack(fill="x")
             else:
                 stt_extra.configure(bg="#1e1e1e")
 
@@ -1112,16 +2439,179 @@ def open_settings(icon=None, item=None):
         prompt_var.trace_add("write", _refresh_prompt)
         _refresh_prompt()
 
-        # ── Hotkey & Language ────────────────────────────────────────────────
-        section("General")
+        # ══ TEXT → SPEECH TAB ════════════════════════════════════════════════
+        chk_cfg = dict(bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
+                       activebackground="#1e1e1e", activeforeground="#ffffff",
+                       font=("Segoe UI", 9))
 
-        row1 = tk.Frame(body, bg="#1e1e1e")
+        section("Read Selected Text", tab_tts)
+        tts_on_var = tk.BooleanVar(value=TTS_ENABLED)
+        tk.Checkbutton(tab_tts, text="Enable  —  select text anywhere, press the hotkey, hear it",
+                       variable=tts_on_var, **chk_cfg).pack(anchor="w")
+
+        row_th = tk.Frame(tab_tts, bg="#1e1e1e")
+        row_th.pack(fill="x", pady=(6, 2))
+        tk.Label(row_th, text="Hotkey:", width=12, anchor="w", **lbl_style).pack(side="left")
+        tts_hotkey_var = tk.StringVar(value=TTS_HOTKEY)
+        tk.Entry(row_th, textvariable=tts_hotkey_var, width=20, **ent_style).pack(side="left")
+
+        section("Voice Engine", tab_tts)
+        tts_eng_var = tk.StringVar(value=TTS_ENGINE)
+        for label, val in [
+                ("Edge  —  free, no key, instant  (Microsoft neural voices)", "edge"),
+                ("Vertex Gemini-TTS  —  Google Cloud credential, tunable tone", "vertex")]:
+            tk.Radiobutton(tab_tts, text=label, variable=tts_eng_var, value=val,
+                           **rb_cfg).pack(anchor="w")
+
+        tts_extra = tk.Frame(tab_tts, bg="#1e1e1e")
+        tts_extra.pack(fill="x", pady=(4, 0))
+
+        def _om(parent, var, values, width=None):
+            om = tk.OptionMenu(parent, var, *values)
+            om.config(bg="#333333", fg="#cccccc", activebackground="#444444",
+                      activeforeground="#ffffff", highlightthickness=0,
+                      relief="flat", font=("Segoe UI", 9), anchor="w")
+            if width:
+                om.config(width=width)
+            om["menu"].config(bg="#333333", fg="#cccccc",
+                              activebackground="#0078d4", activeforeground="#ffffff")
+            return om
+
+        # Edge sub-frame
+        edge_frame = tk.Frame(tts_extra, bg="#252525", padx=12, pady=8)
+        row_ev = tk.Frame(edge_frame, bg="#252525")
+        row_ev.pack(fill="x", pady=2)
+        tk.Label(row_ev, text="Voice:", width=14, anchor="w",
+                 bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(side="left")
+        edge_voice_var = tk.StringVar(value=TTS_EDGE_VOICE)
+        _om(row_ev, edge_voice_var, TTS_EDGE_VOICES, width=24).pack(side="left")
+        tk.Label(edge_frame, text="Free Microsoft Edge voices. No account, no cost.",
+                 bg="#252525", fg="#666666", font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+
+        # Vertex sub-frame
+        vx_frame = tk.Frame(tts_extra, bg="#252525", padx=12, pady=8)
+
+        def _vx_row(label, value, values):
+            r = tk.Frame(vx_frame, bg="#252525")
+            r.pack(fill="x", pady=2)
+            tk.Label(r, text=label, width=14, anchor="w",
+                     bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(side="left")
+            v = tk.StringVar(value=value)
+            _om(r, v, values, width=28).pack(side="left")
+            return v
+
+        vx_voice_var = _vx_row("Voice:", TTS_VERTEX_VOICE, TTS_VERTEX_VOICES)
+        vx_model_var = _vx_row("Model:", TTS_VERTEX_MODEL, TTS_VERTEX_MODELS)
+
+        r_cred = tk.Frame(vx_frame, bg="#252525")
+        r_cred.pack(fill="x", pady=2)
+        tk.Label(r_cred, text="Credential:", width=14, anchor="w",
+                 bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(side="left")
+        vx_cred_var = tk.StringVar(value=TTS_VERTEX_CRED)
+        tk.Entry(r_cred, textvariable=vx_cred_var, width=30,
+                 **{**ent_style, "bg": "#333333"}).pack(side="left")
+
+        def _pick_cred():
+            from tkinter import filedialog
+            p = filedialog.askopenfilename(parent=win, title="Google credential JSON",
+                                           filetypes=[("JSON", "*.json")])
+            if p:
+                vx_cred_var.set(p)
+
+        tk.Button(r_cred, text="...", command=_pick_cred, width=3,
+                  bg="#3c3c3c", fg="#cccccc", relief="flat",
+                  activebackground="#4c4c4c").pack(side="left", padx=(4, 0))
+
+        r_proj = tk.Frame(vx_frame, bg="#252525")
+        r_proj.pack(fill="x", pady=2)
+        tk.Label(r_proj, text="Project id:", width=14, anchor="w",
+                 bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(side="left")
+        vx_proj_var = tk.StringVar(value=TTS_VERTEX_PROJECT)
+        tk.Entry(r_proj, textvariable=vx_proj_var, width=30,
+                 **{**ent_style, "bg": "#333333"}).pack(side="left")
+        tk.Label(vx_frame, text="Blank = read from the credential file. Vertex AI only, never AI Studio.",
+                 bg="#252525", fg="#666666", font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+
+        tk.Label(vx_frame, text="Tone prompt:", anchor="w",
+                 bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 2))
+        style_wrap = tk.Frame(vx_frame, bg="#252525")
+        style_wrap.pack(fill="x")
+        tts_style_text = tk.Text(style_wrap, height=4, bg="#333333", fg="#ffffff",
+                                 insertbackground="#ffffff", relief="flat",
+                                 font=("Segoe UI", 9), wrap="word")
+        tts_style_text.insert("1.0", TTS_STYLE)
+        tts_style_text.pack(side="left", fill="x", expand=True)
+        style_sb = tk.Scrollbar(style_wrap, command=tts_style_text.yview)
+        style_sb.pack(side="right", fill="y")
+        tts_style_text.config(yscrollcommand=style_sb.set)
+
+        def _reset_tts_style():
+            tts_style_text.delete("1.0", "end")
+            tts_style_text.insert("1.0", TTS_DEFAULT_STYLE)
+
+        tk.Button(vx_frame, text="Reset to default", command=_reset_tts_style,
+                  bg="#3c3c3c", fg="#888888", relief="flat", font=("Segoe UI", 8),
+                  activebackground="#4c4c4c", activeforeground="#cccccc").pack(anchor="e", pady=(4, 0))
+
+        def _refresh_tts_extra(*_):
+            for child in tts_extra.winfo_children():
+                child.pack_forget()
+            tts_extra.configure(bg="#252525")
+            (vx_frame if tts_eng_var.get() == "vertex" else edge_frame).pack(fill="x")
+
+        tts_eng_var.trace_add("write", _refresh_tts_extra)
+        _refresh_tts_extra()
+
+        section("Playback", tab_tts)
+        row_sp = tk.Frame(tab_tts, bg="#1e1e1e")
+        row_sp.pack(fill="x", pady=2)
+        tk.Label(row_sp, text="Speed:", width=12, anchor="w", **lbl_style).pack(side="left")
+        tts_speed_var = tk.DoubleVar(value=TTS_SPEED)
+        speed_lbl = tk.Label(row_sp, text=f"{TTS_SPEED:.2f}x", width=6,
+                             bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9))
+        tk.Scale(row_sp, from_=0.5, to=2.0, resolution=0.05, orient="horizontal",
+                 variable=tts_speed_var, showvalue=False, length=200,
+                 bg="#1e1e1e", troughcolor="#2d2d2d", highlightthickness=0, bd=0,
+                 sliderrelief="flat", activebackground="#0078d4",
+                 command=lambda v: speed_lbl.config(text=f"{float(v):.2f}x")).pack(side="left")
+        speed_lbl.pack(side="left", padx=(6, 0))
+        tk.Label(tab_tts, text="Pitch is preserved at any speed (WSOLA time-stretch).",
+                 bg="#1e1e1e", fg="#666666", font=("Segoe UI", 8)).pack(anchor="w")
+
+        tts_popup_var = tk.BooleanVar(value=TTS_POPUP)
+        tk.Checkbutton(tab_tts, text="Show the player widget while reading",
+                       variable=tts_popup_var, **chk_cfg).pack(anchor="w", pady=(8, 0))
+
+        row_ac = tk.Frame(tab_tts, bg="#1e1e1e")
+        row_ac.pack(fill="x", pady=2)
+        tk.Label(row_ac, text="Auto-close:", width=12, anchor="w", **lbl_style).pack(side="left")
+        tts_close_var = tk.StringVar(value=str(TTS_POPUP_AUTOCLOSE))
+        tk.Entry(row_ac, textvariable=tts_close_var, width=6, **ent_style).pack(side="left")
+        tk.Label(row_ac, text="seconds after playback ends  (0 = keep open)",
+                 bg="#1e1e1e", fg="#666666", font=("Segoe UI", 8)).pack(side="left", padx=(6, 0))
+
+        def _test_voice():
+            sample = ("این یک نمونه صدا برای تست تنظیمات است."
+                      if edge_voice_var.get().startswith("fa")
+                      or tts_eng_var.get() == "vertex"
+                      else "This is a sample of the selected voice.")
+            _apply_settings(_collect())
+            threading.Thread(target=speak_text, args=(sample,), daemon=True).start()
+
+        tk.Button(tab_tts, text="🔊  Test voice", command=lambda: _test_voice(),
+                  bg="#3c3c3c", fg="#cccccc", relief="flat", font=("Segoe UI", 9),
+                  activebackground="#4c4c4c", activeforeground="#ffffff").pack(anchor="w", pady=(12, 4))
+
+        # ══ GENERAL TAB ══════════════════════════════════════════════════════
+        section("Voice Typing", tab_gen)
+
+        row1 = tk.Frame(tab_gen, bg="#1e1e1e")
         row1.pack(fill="x", pady=2)
         tk.Label(row1, text="Hotkey:", width=12, anchor="w", **lbl_style).pack(side="left")
         hotkey_var = tk.StringVar(value=HOTKEY)
         tk.Entry(row1, textvariable=hotkey_var, width=20, **ent_style).pack(side="left")
 
-        row2 = tk.Frame(body, bg="#1e1e1e")
+        row2 = tk.Frame(tab_gen, bg="#1e1e1e")
         row2.pack(fill="x", pady=2)
         tk.Label(row2, text="Language:", width=12, anchor="w", **lbl_style).pack(side="left")
         lang_var = tk.StringVar(value=LANGUAGE)
@@ -1136,42 +2626,38 @@ def open_settings(icon=None, item=None):
             else:
                 lang_entry.config(state="normal")
 
-        tk.Checkbutton(body, text="Follow Windows keyboard layout  (auto-detect Persian / English)",
+        tk.Checkbutton(tab_gen, text="Follow Windows keyboard layout  (auto-detect Persian / English)",
                        variable=lang_mode_var, command=_toggle_lang_mode,
-                       bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
-                       activebackground="#1e1e1e", activeforeground="#ffffff",
-                       font=("Segoe UI", 9)).pack(anchor="w", padx=(0, 0), pady=(2, 0))
+                       **chk_cfg).pack(anchor="w", padx=(0, 0), pady=(2, 0))
         _toggle_lang_mode()  # apply initial state
 
         # ── Microphone ──────────────────────────────────────────────────────
-        section("Microphone")
+        section("Microphone", tab_gen)
         mic_var = tk.StringVar(value=MIC_MODE)
-        tk.Radiobutton(body, text="Always on  (pre-roll active, mic indicator always visible)",
-                       variable=mic_var, value="always",
-                       bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
-                       activebackground="#1e1e1e", activeforeground="#ffffff",
-                       font=("Segoe UI", 9)).pack(anchor="w")
-        tk.Radiobutton(body, text="On demand  (mic opens only while hotkey held — more secure)",
-                       variable=mic_var, value="on_demand",
-                       bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
-                       activebackground="#1e1e1e", activeforeground="#ffffff",
-                       font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Radiobutton(tab_gen, text="Always on  (pre-roll active, mic indicator always visible)",
+                       variable=mic_var, value="always", **rb_cfg).pack(anchor="w")
+        tk.Radiobutton(tab_gen, text="On demand  (mic opens only while hotkey held — more secure)",
+                       variable=mic_var, value="on_demand", **rb_cfg).pack(anchor="w")
 
         # ── General options ──────────────────────────────────────────────────
-        section("Options")
+        section("Options", tab_gen)
         updates_var = tk.BooleanVar(value=CHECK_UPDATES)
-        tk.Checkbutton(body, text="Check for updates on startup",
-                       variable=updates_var,
-                       bg="#1e1e1e", fg="#cccccc", selectcolor="#2d2d2d",
-                       activebackground="#1e1e1e", activeforeground="#ffffff",
-                       font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Checkbutton(tab_gen, text="Check for updates on startup",
+                       variable=updates_var, **chk_cfg).pack(anchor="w")
 
-        # ── Buttons ──────────────────────────────────────────────────────────
-        btn_frame = tk.Frame(body, bg="#1e1e1e")
-        btn_frame.pack(fill="x", pady=(18, 0))
+        # ── Buttons (shared footer, outside the notebook) ─────────────────────
+        footer_area = tk.Frame(win, bg="#1e1e1e", padx=20, pady=10)
+        footer_area.pack(side="bottom", fill="x")
+        btn_frame = tk.Frame(footer_area, bg="#1e1e1e")
+        btn_frame.pack(fill="x")
 
-        def on_save():
-            new_cfg = {
+        def _collect():
+            """Every widget value as a settings dict (used by Save and Test voice)."""
+            try:
+                autoclose = max(0, int(tts_close_var.get().strip() or 0))
+            except ValueError:
+                autoclose = 30
+            return {
                 "stt_engine":           stt_var.get(),
                 "prompt_mode":          prompt_var.get(),
                 "hotkey":               hotkey_var.get().strip(),
@@ -1187,8 +2673,23 @@ def open_settings(icon=None, item=None):
                 "gemini_system_prompt":     gemini_prompt_text.get("1.0", "end-1c").strip(),
                 "gemini_thinking_level":    thinking_var.get(),
                 "gemini_media_resolution":  media_res_var.get(),
+                "gemini_stt_model":         gstt_model_var.get().strip() or GEMINI_STT_DEFAULT_MODEL,
+                "tts_enabled":          tts_on_var.get(),
+                "tts_hotkey":           tts_hotkey_var.get().strip(),
+                "tts_engine":           tts_eng_var.get(),
+                "tts_edge_voice":       edge_voice_var.get(),
+                "tts_vertex_voice":     vx_voice_var.get(),
+                "tts_vertex_model":     vx_model_var.get(),
+                "tts_vertex_cred":      vx_cred_var.get().strip(),
+                "tts_vertex_project":   vx_proj_var.get().strip(),
+                "tts_style":            tts_style_text.get("1.0", "end-1c").strip(),
+                "tts_speed":            round(float(tts_speed_var.get()), 2),
+                "tts_popup":            tts_popup_var.get(),
+                "tts_popup_autoclose":  autoclose,
             }
-            _apply_settings(new_cfg)
+
+        def on_save():
+            _apply_settings(_collect())
             win.destroy()
 
         tk.Button(btn_frame, text="Save", command=on_save, width=10,
@@ -1201,9 +2702,8 @@ def open_settings(icon=None, item=None):
                   activebackground="#4c4c4c", activeforeground="white").pack(side="right")
 
         # ── Footer ───────────────────────────────────────────────────────────
-        ttk.Separator(body).pack(fill="x", pady=(16, 6))
-        footer = tk.Frame(body, bg="#1e1e1e")
-        footer.pack(fill="x", pady=(0, 8))
+        footer = tk.Frame(footer_area, bg="#1e1e1e")
+        footer.pack(fill="x", pady=(10, 0))
         tk.Label(footer, text=f"SpeakPaste v{VERSION}",
                  bg="#1e1e1e", fg="#555555", font=("Segoe UI", 8)).pack(side="left")
         link = tk.Label(footer, text="View on GitHub ↗",
@@ -1221,11 +2721,12 @@ def open_settings(icon=None, item=None):
         win.protocol("WM_DELETE_WINDOW", _on_close)
 
         win.update_idletasks()  # force layout calculation
-        # size and center: cap height at 90% of screen
+        # Size to the widest tab so switching tabs never resizes the window.
         sw = win.winfo_screenwidth()
         sh = win.winfo_screenheight()
-        w  = body.winfo_reqwidth() + scrollbar.winfo_reqwidth() + 4
-        h  = min(body.winfo_reqheight() + 8, int(sh * 0.90))
+        w  = max(t.winfo_reqwidth() for t in (tab_stt, tab_tts, tab_gen)) + 40
+        h  = min(max(t.winfo_reqheight() for t in (tab_stt, tab_tts, tab_gen))
+                 + footer_area.winfo_reqheight() + 60, int(sh * 0.90))
         win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
         win.deiconify()  # now show
 
@@ -1256,9 +2757,34 @@ def open_history(icon=None, item=None):
         show_stt_var   = tk.BooleanVar(value=True)
         _known_len     = [-1]  # last rendered history length; -1 forces first render
 
+        # Click any entry to copy it. Each clickable run gets its own tag whose
+        # binding closes over that entry's text.
+        _click_tags = []
+
+        def _copy(text_value):
+            _clipboard_set_text(text_value)
+            flash.config(text="✓ copied")
+            win.after(1400, lambda: flash.config(text=""))
+
+        def _clickable(start, end, value):
+            tag = f"click{len(_click_tags)}"
+            _click_tags.append(tag)
+            txt.tag_add(tag, start, end)
+            txt.tag_config(tag)
+            txt.tag_bind(tag, "<Button-1>", lambda e, v=value: _copy(v))
+            txt.tag_bind(tag, "<Enter>",
+                         lambda e, t=tag: (txt.config(cursor="hand2"),
+                                           txt.tag_config(t, background="#242424")))
+            txt.tag_bind(tag, "<Leave>",
+                         lambda e, t=tag: (txt.config(cursor="arrow"),
+                                           txt.tag_config(t, background="")))
+
         def _render():
             _known_len[0] = len(_history)
             txt.config(state="normal")
+            for t in _click_tags:
+                txt.tag_delete(t)
+            _click_tags.clear()
             txt.delete("1.0", "end")
             entries = list(_history)
             if not entries:
@@ -1272,6 +2798,7 @@ def open_history(icon=None, item=None):
                     txt.insert("end", entry["stt"], "stt")
                     if _is_rtl(entry["stt"]):
                         txt.tag_add("rtl", ln_start, txt.index("end-1c"))
+                    _clickable(ln_start, txt.index("end-1c"), entry["stt"])
                     txt.insert("end", "\n")
                 lbl = "  Prompt  " if entry.get("stt") else "  "
                 ln_start = txt.index("end-1c")
@@ -1279,6 +2806,7 @@ def open_history(icon=None, item=None):
                 txt.insert("end", entry["output"], "out")
                 if _is_rtl(entry["output"]):
                     txt.tag_add("rtl", ln_start, txt.index("end-1c"))
+                _clickable(ln_start, txt.index("end-1c"), entry["output"])
                 txt.insert("end", "\n\n")
             txt.config(state="disabled")
 
@@ -1306,6 +2834,12 @@ def open_history(icon=None, item=None):
             font=("Segoe UI", 9),
             activebackground="#4c4c4c", activeforeground="#cccccc",
         ).pack(side="right")
+
+        flash = tk.Label(top, text="", bg="#1e1e1e", fg="#4caf50",
+                         font=("Segoe UI", 8))
+        flash.pack(side="right", padx=(0, 10))
+        tk.Label(top, text="click any line to copy", bg="#1e1e1e", fg="#555555",
+                 font=("Segoe UI", 8)).pack(side="left", padx=(12, 0))
 
         ttk.Separator(win).pack(fill="x")
 
@@ -1430,6 +2964,11 @@ def setup_tray():
         pystray.MenuItem("Settings...", open_settings),
         pystray.MenuItem("History...", open_history),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Read clipboard aloud", speak_clipboard,
+                         visible=lambda item: TTS_ENABLED),
+        pystray.MenuItem("Stop reading", lambda i, it: _get_player().stop(),
+                         visible=lambda item: TTS_ENABLED),
+        pystray.Menu.SEPARATOR,
         pystray.MenuItem(_mic_status, _toggle_mic_mode,
                          checked=lambda item: MIC_MODE == "on_demand"),
         pystray.MenuItem("Run at startup", _toggle_startup,
@@ -1440,7 +2979,8 @@ def setup_tray():
     tray_icon = pystray.Icon(
         "speakpaste",
         create_icon("idle"),
-        f"SpeakPaste [{_tray_label}]\n{HOTKEY.upper()} to record",
+        (f"SpeakPaste [{_tray_label}]\n{HOTKEY.upper()} to record"
+         + (f"\n{TTS_HOTKEY.upper()} to read selection" if TTS_ENABLED else "")),
         menu,
     )
     return tray_icon
