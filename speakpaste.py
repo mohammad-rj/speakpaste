@@ -1789,8 +1789,9 @@ def open_tts_popup(status=""):
 
         BG, CARD, DIM, FG   = "#181818", "#202020", "#7a7a7a", "#e8e8e8"
         TRACK, ACCENT       = "#3a3a3a", "#4c9aff"
-        W, H                = 348, 92
-        SEEK_W, SPEED_W     = 324, 120
+        W                   = 348
+        SEEK_W, SPEED_W     = 328, 56
+        BAR_H               = 6    # thin timeline; height is auto-fit to content below
 
         win = tk.Toplevel(_ui_root)
         win.withdraw()
@@ -1801,28 +1802,28 @@ def open_tts_popup(status=""):
 
         card = tk.Frame(win, bg=BG)
         card.pack(fill="both", expand=True, padx=1, pady=1)
-        pad = tk.Frame(card, bg=BG, padx=12, pady=9)
+        pad = tk.Frame(card, bg=BG, padx=9, pady=3)
         pad.pack(fill="both", expand=True)
 
-        # ── top row: transport, time, status, close ──────────────────────────
+        # ── single row: transport, time/part, speed, status, close ───────────
         top = tk.Frame(pad, bg=BG)
         top.pack(fill="x")
 
-        def _icon_btn(parent, glyph, size=12):
+        def _icon_btn(parent, glyph, size=11):
             b = tk.Label(parent, text=glyph, bg=BG, fg=FG,
                          font=("Segoe UI Symbol", size), cursor="hand2")
             b.bind("<Enter>", lambda e: b.config(fg="#ffffff"))
             b.bind("<Leave>", lambda e: b.config(fg=FG))
             return b
 
-        prev_btn = _icon_btn(top, "◀◀", 10)
-        prev_btn.pack(side="left", padx=(0, 8))
-        play_btn = _icon_btn(top, "❚❚")
+        prev_btn = _icon_btn(top, "◀◀", 8)
+        prev_btn.pack(side="left", padx=(0, 5))
+        play_btn = _icon_btn(top, "❚❚", 10)
         play_btn.pack(side="left")
-        next_btn = _icon_btn(top, "▶▶", 10)
-        next_btn.pack(side="left", padx=(8, 0))
-        stop_btn = _icon_btn(top, "■", 11)
-        stop_btn.pack(side="left", padx=(10, 12))
+        next_btn = _icon_btn(top, "▶▶", 8)
+        next_btn.pack(side="left", padx=(5, 0))
+        stop_btn = _icon_btn(top, "■", 9)
+        stop_btn.pack(side="left", padx=(7, 9))
 
         time_lbl = tk.Label(top, text="0:00 / 0:00", bg=BG, fg=DIM,
                             font=("Segoe UI", 8))
@@ -1830,8 +1831,11 @@ def open_tts_popup(status=""):
 
         chunk_lbl = tk.Label(top, text="", bg=BG, fg="#5f5f5f",
                              font=("Segoe UI", 8))
-        chunk_lbl.pack(side="left", padx=(8, 0))
+        chunk_lbl.pack(side="left", padx=(6, 0))
 
+        # Packed side="right" in this order so the visual left-to-right result
+        # is: speed slider, speed value, status, close (each pack claims the
+        # next slice from the right edge, so first-packed ends up rightmost).
         close_btn = tk.Label(top, text="✕", bg=BG, fg="#5a5a5a",
                              font=("Segoe UI", 9), cursor="hand2")
         close_btn.pack(side="right")
@@ -1840,41 +1844,39 @@ def open_tts_popup(status=""):
 
         status_lbl = tk.Label(top, text=status, bg=BG, fg="#cca700",
                               font=("Segoe UI", 8))
-        status_lbl.pack(side="right", padx=(0, 10))
+        status_lbl.pack(side="right", padx=(0, 8))
+
+        speed_val = tk.Label(top, text=f"{TTS_SPEED:.2f}x", bg=BG, fg=DIM,
+                             font=("Segoe UI", 8), width=5, anchor="e")
+        speed_val.pack(side="right")
 
         # ── canvas sliders: thin, rounded, no chunky tk.Scale chrome ─────────
-        def _bar(parent, width, height=14):
+        def _bar(parent, width, height=BAR_H):
             return tk.Canvas(parent, width=width, height=height, bg=BG,
                              highlightthickness=0, bd=0, cursor="hand2")
 
-        def _draw(cv, width, frac, active=True, marks=()):
+        def _draw(cv, width, frac, active=True, marks=(), height=BAR_H):
             cv.delete("all")
-            y, x0, x1 = 7, 5, width - 5
-            cv.create_line(x0, y, x1, y, fill=TRACK, width=3, capstyle="round")
+            y, x0, x1 = height // 2, 5, width - 5
+            r = 3 if height >= 8 else 2
+            cv.create_line(x0, y, x1, y, fill=TRACK, width=r, capstyle="round")
             x = x0 + (x1 - x0) * max(0.0, min(1.0, frac))
             col = ACCENT if active else "#5a5a5a"
             if x > x0:
-                cv.create_line(x0, y, x, y, fill=col, width=3, capstyle="round")
+                cv.create_line(x0, y, x, y, fill=col, width=r, capstyle="round")
             # chunk boundaries, so the split is visible rather than guessed at
             for m in marks:
                 if m <= 0:
                     continue
                 mx = x0 + (x1 - x0) * m
-                cv.create_line(mx, y - 4, mx, y + 4, fill="#7a7a7a", width=1)
-            cv.create_oval(x - 4, y - 4, x + 4, y + 4, fill=col, outline="")
+                cv.create_line(mx, y - r - 1, mx, y + r + 1, fill="#7a7a7a", width=1)
+            cv.create_oval(x - r - 1, y - r - 1, x + r + 1, y + r + 1, fill=col, outline="")
+
+        speed_cv = _bar(top, SPEED_W)
+        speed_cv.pack(side="right", padx=(0, 6))
 
         seek_cv = _bar(pad, SEEK_W)
-        seek_cv.pack(fill="x", pady=(9, 0))
-
-        srow = tk.Frame(pad, bg=BG)
-        srow.pack(fill="x", pady=(6, 0))
-        tk.Label(srow, text="Speed", bg=BG, fg=DIM,
-                 font=("Segoe UI", 8)).pack(side="left")
-        speed_val = tk.Label(srow, text=f"{TTS_SPEED:.2f}x", bg=BG, fg=DIM,
-                             font=("Segoe UI", 8), width=5, anchor="e")
-        speed_val.pack(side="right")
-        speed_cv = _bar(srow, SPEED_W)
-        speed_cv.pack(side="left", padx=(8, 6))
+        seek_cv.pack(fill="x", pady=(2, 0))
 
         state = {"seeking": False, "closed": False, "frac": 0.0}
 
@@ -1926,7 +1928,7 @@ def open_tts_popup(status=""):
         def _drag_move(e):
             win.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
 
-        for w_ in (card, pad, top, srow, time_lbl, status_lbl):
+        for w_ in (card, pad, top, time_lbl, status_lbl):
             w_.bind("<Button-1>", _drag_start)
             w_.bind("<B1-Motion>", _drag_move)
 
@@ -1974,7 +1976,7 @@ def open_tts_popup(status=""):
                       marks if total > 1 else ())
             play_btn.config(text="❚❚" if p.playing else "▶")
             # chunk counter + grey out the arrows at the ends
-            chunk_lbl.config(text=f"part {idx}/{total}" if total > 1 else "")
+            chunk_lbl.config(text=f"{idx}/{total}" if total > 1 else "")
             prev_btn.config(fg=FG if total > 1 else "#3a3a3a")
             next_btn.config(fg=FG if (total > 1 and idx < total) else "#3a3a3a")
             # while streaming, show which chunk is being synthesized
@@ -1990,7 +1992,11 @@ def open_tts_popup(status=""):
                 return
             win.after(200, _tick)
 
-        # Fixed size and final position BEFORE mapping, so it never jumps.
+        # Size and final position BEFORE mapping, so it never jumps. Height is
+        # measured from the actual (now very compact) content rather than a
+        # hand-guessed constant, so it stays minimal if fonts/padding change.
+        win.update_idletasks()
+        H = pad.winfo_reqheight() + 2   # +2 for the 1px hairline border top/bottom
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         win.geometry(f"{W}x{H}+{sw - W - 24}+{sh - H - 72}")
         win.update_idletasks()
@@ -2714,9 +2720,13 @@ def open_settings(icon=None, item=None):
         tk.Checkbutton(tab_tts, text="Enable  —  select text anywhere, press the hotkey, hear it",
                        variable=tts_on_var, **chk_cfg).pack(anchor="w")
 
-        def _hotkey_row(parent, var):
-            """Hotkey entry + a Record button that captures and validates."""
-            warn = tk.Label(parent, text="", bg="#1e1e1e", fg="#e0a030",
+        def _hotkey_row(row, outer, var):
+            """Entry + Record button in `row`; the validation warning is a
+            sibling of `row` inside `outer`, so no cross-container pack(in_=)
+            trick is needed (that trick raised a TclError - the warning label's
+            real parent was the row, not the tab, and Tk rejects packing a
+            widget into a container it is already nested under)."""
+            warn = tk.Label(outer, text="", bg="#1e1e1e", fg="#e0a030",
                             font=("Segoe UI", 8), wraplength=330, justify="left")
 
             def _check(*_):
@@ -2730,8 +2740,8 @@ def open_settings(icon=None, item=None):
                     warn.config(text="" if ok else "⚠  " + msg)
                 capture_hotkey(win, _got)
 
-            tk.Entry(parent, textvariable=var, width=18, **ent_style).pack(side="left")
-            tk.Button(parent, text="Record", command=_record,
+            tk.Entry(row, textvariable=var, width=18, **ent_style).pack(side="left")
+            tk.Button(row, text="Record", command=_record,
                       bg="#3c3c3c", fg="#cccccc", relief="flat",
                       font=("Segoe UI", 8), activebackground="#4c4c4c",
                       activeforeground="#ffffff").pack(side="left", padx=(6, 0))
@@ -2743,7 +2753,7 @@ def open_settings(icon=None, item=None):
         row_th.pack(fill="x", pady=(6, 2))
         tk.Label(row_th, text="Hotkey:", width=12, anchor="w", **lbl_style).pack(side="left")
         tts_hotkey_var = tk.StringVar(value=TTS_HOTKEY)
-        _hotkey_row(row_th, tts_hotkey_var).pack(in_=tab_tts, anchor="w", pady=(0, 4))
+        _hotkey_row(row_th, tab_tts, tts_hotkey_var).pack(anchor="w", pady=(0, 4))
 
         section("Voice Engine", tab_tts)
         tts_eng_var = tk.StringVar(value=TTS_ENGINE)
@@ -2899,7 +2909,7 @@ def open_settings(icon=None, item=None):
         row1.pack(fill="x", pady=2)
         tk.Label(row1, text="Hotkey:", width=12, anchor="w", **lbl_style).pack(side="left")
         hotkey_var = tk.StringVar(value=HOTKEY)
-        _hotkey_row(row1, hotkey_var).pack(in_=tab_gen, anchor="w", pady=(0, 4))
+        _hotkey_row(row1, tab_gen, hotkey_var).pack(anchor="w", pady=(0, 4))
 
         row2 = tk.Frame(tab_gen, bg="#1e1e1e")
         row2.pack(fill="x", pady=2)

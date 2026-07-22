@@ -79,6 +79,10 @@ polished English.
 
 Select text anywhere and press **Win+Shift**. A small player appears in the corner:
 
+<p align="center">
+  <img src="docs/screenshots/player.png" alt="SpeakPaste's floating player widget">
+</p>
+
 - **⏸ / ▶** pause and resume, **⏹** stop
 - **◀◀ / ▶▶** jump between parts of a long text — pressing back mid-part replays that part from its start
 - **Seek bar** — click anywhere to jump; the tick marks show where each part begins
@@ -90,7 +94,7 @@ your previous clipboard content back exactly as it was.
 
 Long text starts playing after a few seconds rather than making you wait for the
 whole thing: it is split at sentence boundaries, the next parts are prepared while
-the current one plays, and the counter shows which part you are on (`part 2/5`).
+the current one plays, and the counter shows which part you are on (`2/5`).
 Missed something? Press ◀◀ to hear that part again.
 
 | Engine | Cost | Needs | Voice |
