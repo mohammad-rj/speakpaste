@@ -144,6 +144,13 @@ _DEFAULTS = {
 
 # ─── Settings Load / Save ─────────────────────────────────────────────────────
 
+def validate_ws_port(value):
+    """Return value if it's an int in 1024..65535, else return default 9137."""
+    if isinstance(value, int) and 1024 <= value <= 65535:
+        return value
+    return 9137
+
+
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -160,6 +167,7 @@ def load_settings():
                 else:
                     cfg["stt_engine"]  = old_engine
                     cfg["prompt_mode"] = "off"
+            cfg["ws_port"] = validate_ws_port(cfg["ws_port"])
             return cfg
         except Exception:
             pass
@@ -185,6 +193,7 @@ def load_settings():
             if ev.get("WS_PORT"):      cfg["ws_port"]      = int(ev["WS_PORT"])
         except Exception:
             pass
+    cfg["ws_port"] = validate_ws_port(cfg["ws_port"])
     return cfg
 
 
