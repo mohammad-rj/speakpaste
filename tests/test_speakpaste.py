@@ -214,6 +214,85 @@ class TestSettingsMigration(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class TestWebSocketPortValidation(unittest.TestCase):
+    """ws_port must be a valid port number; invalid values clamp to 9137."""
+
+    def test_in_range_value_is_preserved(self):
+        """Valid ports in the middle of the range return unchanged."""
+        for port in (1024, 5000, 8080, 9137, 32768, 65535):
+            result = sp.validate_ws_port(port)
+            self.assertEqual(result, port, f"Port {port} should be preserved")
+            self.assertIsInstance(result, int)
+
+    def test_lower_bound_preserved(self):
+        """Port 1024 (minimum) is valid."""
+        self.assertEqual(sp.validate_ws_port(1024), 1024)
+
+    def test_upper_bound_preserved(self):
+        """Port 65535 (maximum) is valid."""
+        self.assertEqual(sp.validate_ws_port(65535), 65535)
+
+    def test_below_lower_bound_clamps(self):
+        """Ports below 1024 clamp to default 9137."""
+        for port in (0, 1, 100, 500, 1023):
+            result = sp.validate_ws_port(port)
+            self.assertEqual(result, 9137, f"Port {port} should clamp to 9137")
+
+    def test_above_upper_bound_clamps(self):
+        """Ports above 65535 clamp to default 9137."""
+        for port in (65536, 70000, 99999, 100000):
+            result = sp.validate_ws_port(port)
+            self.assertEqual(result, 9137, f"Port {port} should clamp to 9137")
+
+    def test_string_clamps_to_default(self):
+        """Non-int strings clamp to 9137."""
+        for value in ("9137", "8080", "invalid", ""):
+            result = sp.validate_ws_port(value)
+            self.assertEqual(result, 9137, f"String {value!r} should clamp to 9137")
+
+    def test_float_clamps_to_default(self):
+        """Float values clamp to 9137."""
+        for value in (8080.0, 9137.5, 1024.1):
+            result = sp.validate_ws_port(value)
+            self.assertEqual(result, 9137, f"Float {value} should clamp to 9137")
+
+    def test_none_clamps_to_default(self):
+        """None clamps to 9137."""
+        self.assertEqual(sp.validate_ws_port(None), 9137)
+
+    def test_boolean_clamps_to_default(self):
+        """Boolean values (True/False) clamp to 9137."""
+        self.assertEqual(sp.validate_ws_port(True), 9137)
+        self.assertEqual(sp.validate_ws_port(False), 9137)
+
+    def test_always_returns_int(self):
+        """Result is always an int."""
+        test_values = [9137, "8080", 8080.0, None, True, -1, 65536]
+        for val in test_values:
+            result = sp.validate_ws_port(val)
+            self.assertIsInstance(result, int)
+
+
+class TestLoadSettingsWithPortValidation(unittest.TestCase):
+    """load_settings must use validate_ws_port to clamp invalid ws_port."""
+
+    def test_load_settings_applies_ws_port_validation(self):
+        """load_settings() calls validate_ws_port on the loaded ws_port."""
+        # When no settings file exists, defaults apply with validation
+        cfg = sp.load_settings()
+        self.assertEqual(cfg["ws_port"], sp._DEFAULTS["ws_port"])
+        self.assertIsInstance(cfg["ws_port"], int)
+        self.assertGreaterEqual(cfg["ws_port"], 1024)
+        self.assertLessEqual(cfg["ws_port"], 65535)
+
+    def test_defaults_have_valid_ws_port(self):
+        """The default ws_port is in valid range."""
+        default_port = sp._DEFAULTS["ws_port"]
+        self.assertIsInstance(default_port, int)
+        self.assertGreaterEqual(default_port, 1024)
+        self.assertLessEqual(default_port, 65535)
+
+
 class TestRtlDetection(unittest.TestCase):
     def test_persian_is_rtl(self):
         self.assertTrue(sp._is_rtl("سلام دنیا"))
