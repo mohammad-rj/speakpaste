@@ -58,7 +58,7 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VERSION       = "1.11.0"
+VERSION       = "1.12.0"
 GITHUB_REPO   = "mohammad-rj/speakpaste"
 GITHUB_URL    = f"https://github.com/{GITHUB_REPO}"
 
@@ -118,6 +118,10 @@ _DEFAULTS = {
     "ws_port":                   9137,
     "check_updates":             True,
     "gemini_api_key":            "",
+    # Blank = Google AI Studio. Set both to route every Gemini call through a
+    # Gemini-compatible proxy instead (the proxy holds the real key).
+    "gemini_base_url":           "",
+    "gemini_auth_token":         "",
     "gemini_system_prompt":      GEMINI_DEFAULT_SYSTEM_PROMPT,
     "lang_mode":                 "fixed",
     "gemini_thinking_level":     "LOW",
@@ -243,6 +247,12 @@ GOOGLE_CLOUD_API_KEY = _cfg["google_cloud_api_key"]
 WS_PORT              = _cfg["ws_port"]
 CHECK_UPDATES        = _cfg["check_updates"]
 GEMINI_API_KEY            = _cfg.get("gemini_api_key", "")
+# Environment wins over settings.json, so a shared machine can point the app at
+# its own proxy without anyone editing the config file.
+GEMINI_BASE_URL           = (os.environ.get("SPEAKPASTE_GEMINI_BASE_URL")
+                             or _cfg.get("gemini_base_url", "")).rstrip("/")
+GEMINI_AUTH_TOKEN         = (os.environ.get("SPEAKPASTE_GEMINI_TOKEN")
+                             or _cfg.get("gemini_auth_token", ""))
 GEMINI_SYSTEM_PROMPT      = _cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYSTEM_PROMPT)
 LANG_MODE                 = _cfg.get("lang_mode", "fixed")
 GEMINI_THINKING_LEVEL     = _cfg.get("gemini_thinking_level", "LOW")
@@ -306,6 +316,36 @@ user32 = ctypes.windll.user32
 INPUT_KEYBOARD    = 1
 KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_KEYUP   = 0x0002
+
+# ─── Physical Key State ───────────────────────────────────────────────────────
+# `keyboard.is_pressed()` answers from the library's own hook bookkeeping, not
+# from Windows. Windows silently skips a hook callback whenever the hook thread
+# is slow to answer - here, whenever the GIL is busy recording, transcribing or
+# playing TTS - and one missed key-up leaves that bookkeeping wrong forever: a
+# phantom Win held down made Alt alone satisfy win+alt, until a real Win press
+# cleared it. GetAsyncKeyState keeps no state, so a poll loop cannot get stuck.
+
+user32.GetAsyncKeyState.restype  = ctypes.c_short
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+
+_VK_BY_NAME = {
+    "win":          (0x5B, 0x5C),
+    "windows":      (0x5B, 0x5C),
+    "left windows": (0x5B,),
+    "right windows": (0x5C,),
+    "alt":          (0x12,),
+    "shift":        (0x10,),
+    "ctrl":         (0x11,),
+    "control":      (0x11,),
+}
+
+
+def _phys_down(key):
+    """True while `key` is physically held - asked of Windows, not of a cache."""
+    vks = _VK_BY_NAME.get(str(key).strip().lower())
+    if not vks:                                   # letters, F-keys, anything else
+        return keyboard.is_pressed(key)
+    return any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in vks)
 
 # ─── Keyboard Layout Detection ────────────────────────────────────────────────
 
@@ -578,12 +618,22 @@ PROVIDER_ADAPTERS = {
 
 
 def _gemini_endpoint(model):
-    """(url, headers) for a Gemini call, preferring Vertex AI.
+    """(url, headers) for a Gemini call. Returns (None, None) if unconfigured.
 
-    Vertex is used whenever a Google credential file is configured; the
-    generativelanguage.googleapis.com key path is only a fallback for users who
-    have an API key and no credential. Returns (None, None) if neither exists.
+    Order: a custom base URL wins if one is set, then Vertex AI whenever a Google
+    credential file is configured, then the plain generativelanguage.googleapis.com
+    key path. The custom URL is for any Gemini-compatible proxy - it takes the same
+    request body and path, so only the host and the auth header change; the proxy
+    holds the real Google key, which is why the token here is not an AIzaSy one.
     """
+    if GEMINI_BASE_URL:
+        # A named User-Agent is not cosmetic here: proxies behind Cloudflare
+        # answer 403 (error code 1010) to the default python-urllib/requests one.
+        headers = {"Content-Type": "application/json",
+                   "User-Agent": f"SpeakPaste/{VERSION}"}
+        if GEMINI_AUTH_TOKEN:
+            headers["Authorization"] = f"Bearer {GEMINI_AUTH_TOKEN}"
+        return f"{GEMINI_BASE_URL}/models/{model}:generateContent", headers
     if TTS_VERTEX_CRED and os.path.exists(TTS_VERTEX_CRED):
         try:
             token, proj = _vertex_access_token(TTS_VERTEX_CRED)
@@ -974,7 +1024,7 @@ def type_text(text):
     if not text:
         return
     keys = HOTKEY.split('+')
-    while any(keyboard.is_pressed(k) for k in keys):
+    while any(_phys_down(k) for k in keys):
         time.sleep(0.05)
     time.sleep(0.3)
     for k in ['left windows', 'right windows', 'alt', 'ctrl', 'shift']:
@@ -1114,7 +1164,7 @@ def get_selected_text(timeout=1.2):
     # Ctrl+C only means "copy" once the hotkey's own modifiers are physically up.
     deadline = time.time() + 3
     hk = [k for k in TTS_HOTKEY.split('+') if k]
-    while time.time() < deadline and any(keyboard.is_pressed(k) for k in hk):
+    while time.time() < deadline and any(_phys_down(k) for k in hk):
         time.sleep(0.05)
     for k in ['left windows', 'right windows', 'alt', 'ctrl', 'shift']:
         try:
@@ -1222,22 +1272,21 @@ def _vertex_access_token(cred_path):
 
 
 def _tts_vertex(text, voice, model, style, lang):
-    """Gemini-TTS on Vertex AI. Returns path to a wav."""
-    if not TTS_VERTEX_CRED or not os.path.exists(TTS_VERTEX_CRED):
-        raise RuntimeError("Vertex credential file not set (Settings -> Text to Speech)")
+    """Gemini-TTS. Returns path to a wav.
 
-    token, proj = _vertex_access_token(TTS_VERTEX_CRED)
-    project = TTS_VERTEX_PROJECT or proj
-    if not project:
-        raise RuntimeError("Vertex project id not set")
+    Routed through the same endpoint resolver as every other Gemini call, so a
+    custom base URL, Vertex, or a plain API key all work here without a second
+    code path - only the request body below is TTS-specific.
+    """
+    url, headers = _gemini_endpoint(model)
+    if not url:
+        raise RuntimeError("No Gemini endpoint configured (Settings -> Prompt)")
 
     out = os.path.join(_tts_cache_dir,
                        f"vx_{abs(hash((text, voice, model, style)))}.wav")
     if os.path.exists(out) and os.path.getsize(out) > 0:
         return out
 
-    url = (f"https://aiplatform.googleapis.com/v1/projects/{project}"
-           f"/locations/global/publishers/google/models/{model}:generateContent")
     prompt = f"{style}\n\n{text}" if style else text
     body = json.dumps({
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -1253,8 +1302,7 @@ def _tts_vertex(text, voice, model, style, lang):
     # accept on the very next try, so a couple of retries beats failing a read.
     resp = None
     for attempt in range(3):
-        req = urllib.request.Request(url, data=body, method="POST", headers={
-            "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        req = urllib.request.Request(url, data=body, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=180) as r:
                 resp = json.load(r)
@@ -1262,8 +1310,8 @@ def _tts_vertex(text, voice, model, style, lang):
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:160].replace("\n", " ")
             if attempt == 2:
-                raise RuntimeError(f"Vertex {e.code}: {detail}") from None
-            log(f"Vertex {e.code}, retrying ({attempt + 1}/2)")
+                raise RuntimeError(f"TTS {e.code}: {detail}") from None
+            log(f"TTS {e.code}, retrying ({attempt + 1}/2)")
             time.sleep(1.0 + attempt)
 
     part = resp["candidates"][0]["content"]["parts"][0]["inlineData"]
@@ -2120,7 +2168,7 @@ def keyboard_listener():
             # The TTS combo may share modifiers with the STT one, so check it
             # first and keep STT muted while it is held.
             tts_keys = TTS_HOTKEY.split('+') if (TTS_ENABLED and TTS_HOTKEY) else []
-            tts_down = bool(tts_keys) and all(keyboard.is_pressed(k) for k in tts_keys)
+            tts_down = bool(tts_keys) and all(_phys_down(k) for k in tts_keys)
 
             if tts_down and not is_tts_hotkey_active:
                 is_tts_hotkey_active = True
@@ -2141,7 +2189,7 @@ def keyboard_listener():
                 continue
 
             keys = HOTKEY.split('+')
-            pressed = all(keyboard.is_pressed(k) for k in keys)
+            pressed = all(_phys_down(k) for k in keys)
             if stt_blocked:
                 if not pressed:
                     stt_blocked = False
@@ -2394,6 +2442,7 @@ def _apply_settings(new_cfg):
     global STT_ENGINE, PROMPT_MODE, HOTKEY, LANGUAGE, MIC_MODE, GROQ_API_KEY, MODEL, WS_PORT, CHECK_UPDATES
     global GOOGLE_CLOUD_API_KEY
     global GEMINI_API_KEY, GEMINI_SYSTEM_PROMPT, LANG_MODE, GEMINI_THINKING_LEVEL, GEMINI_MEDIA_RESOLUTION
+    global GEMINI_BASE_URL, GEMINI_AUTH_TOKEN
     global GEMINI_STT_MODEL, INJECT_MODE, NOTIFY_ERRORS
     global TTS_ENABLED, TTS_HOTKEY, TTS_ENGINE, TTS_EDGE_VOICE, TTS_VERTEX_VOICE
     global TTS_VERTEX_MODEL, TTS_VERTEX_CRED, TTS_VERTEX_PROJECT, TTS_STYLE
@@ -2413,6 +2462,10 @@ def _apply_settings(new_cfg):
     MIC_MODE                = new_cfg["mic_mode"]
     CHECK_UPDATES           = new_cfg["check_updates"]
     GEMINI_API_KEY          = new_cfg.get("gemini_api_key", "")
+    GEMINI_BASE_URL         = (os.environ.get("SPEAKPASTE_GEMINI_BASE_URL")
+                               or new_cfg.get("gemini_base_url", "")).rstrip("/")
+    GEMINI_AUTH_TOKEN       = (os.environ.get("SPEAKPASTE_GEMINI_TOKEN")
+                               or new_cfg.get("gemini_auth_token", ""))
     GEMINI_SYSTEM_PROMPT    = new_cfg.get("gemini_system_prompt", GEMINI_DEFAULT_SYSTEM_PROMPT)
     LANG_MODE               = new_cfg.get("lang_mode", "fixed")
     GEMINI_THINKING_LEVEL   = new_cfg.get("gemini_thinking_level", "LOW")
@@ -2644,6 +2697,29 @@ def open_settings(icon=None, item=None):
                  **{**ent_style, "bg": "#333333"}).pack(side="left")
         tk.Label(gemini_frame,
                  text="aistudio.google.com → Get API key",
+                 bg="#252525", fg="#666666", font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 6))
+
+        # Optional: send every Gemini call to a compatible proxy instead of Google.
+        row_gurl = tk.Frame(gemini_frame, bg="#252525")
+        row_gurl.pack(fill="x", pady=2)
+        tk.Label(row_gurl, text="Base URL:", width=14, anchor="w",
+                 bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(side="left")
+        gemini_url_var = tk.StringVar(value=GEMINI_BASE_URL)
+        tk.Entry(row_gurl, textvariable=gemini_url_var, width=34,
+                 **{**ent_style, "bg": "#333333"}).pack(side="left")
+
+        row_gtok = tk.Frame(gemini_frame, bg="#252525")
+        row_gtok.pack(fill="x", pady=2)
+        tk.Label(row_gtok, text="Base URL token:", width=14, anchor="w",
+                 bg="#252525", fg="#cccccc", font=("Segoe UI", 9)).pack(side="left")
+        gemini_token_var = tk.StringVar(value=GEMINI_AUTH_TOKEN)
+        tk.Entry(row_gtok, textvariable=gemini_token_var, width=34, show="*",
+                 **{**ent_style, "bg": "#333333"}).pack(side="left")
+        tk.Label(gemini_frame,
+                 text="Leave empty to call Google directly. Set it to use any "
+                      "Gemini-compatible proxy,\ne.g. https://your-proxy/v1beta "
+                      "— the token is sent as Authorization: Bearer.",
+                 justify="left",
                  bg="#252525", fg="#666666", font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 6))
 
         tk.Label(gemini_frame, text="System Prompt:", anchor="w",
@@ -2994,6 +3070,8 @@ def open_settings(icon=None, item=None):
                 "ws_port":              WS_PORT,
                 "check_updates":        updates_var.get(),
                 "gemini_api_key":           gemini_key_var.get().strip(),
+                "gemini_base_url":          gemini_url_var.get().strip(),
+                "gemini_auth_token":        gemini_token_var.get().strip(),
                 "gemini_system_prompt":     gemini_prompt_text.get("1.0", "end-1c").strip(),
                 "gemini_thinking_level":    thinking_var.get(),
                 "gemini_media_resolution":  media_res_var.get(),
@@ -3325,8 +3403,8 @@ def main():
             log("WARNING: GROQ_API_KEY not set — open Settings to configure")
         if STT_ENGINE == "google-cloud" and not GOOGLE_CLOUD_API_KEY:
             log("WARNING: GOOGLE_CLOUD_API_KEY not set — open Settings to configure")
-        if PROMPT_MODE in ("gemini-lite", "gemini-flash") and not GEMINI_API_KEY:
-            log("WARNING: GEMINI_API_KEY not set — open Settings to configure")
+        if PROMPT_MODE in ("gemini-lite", "gemini-flash") and not _gemini_endpoint("x")[0]:
+            log("WARNING: no Gemini endpoint configured — open Settings")
         import sounddevice as sd
         audio_stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS,
                                       callback=_audio_callback)

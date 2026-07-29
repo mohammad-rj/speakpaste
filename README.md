@@ -128,6 +128,25 @@ A few things worth knowing:
   which is the more private option. Toggle it from the tray at any time.
 - Settings live in `settings.json` next to the exe.
 
+### Using your own Gemini endpoint
+
+By default every Gemini call goes straight to Google with your AI Studio key. If you
+run a Gemini-compatible proxy — a company gateway, a key-rotation service, anything
+that accepts the same request bodies — fill in **Base URL** and **Base URL token** on
+the Speech → Text tab and the app will call that instead:
+
+```
+Base URL:        https://your-proxy.example.com/v1beta
+Base URL token:  the token your proxy issues
+```
+
+The path and body stay identical; only the host changes, and the token is sent as
+`Authorization: Bearer`. Your real Google key then lives on the proxy, not on your
+machine. Environment variables `SPEAKPASTE_GEMINI_BASE_URL` and
+`SPEAKPASTE_GEMINI_TOKEN` override both fields if you prefer not to store them.
+
+Leave the fields empty and nothing changes.
+
 ---
 
 ## History

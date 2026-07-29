@@ -304,27 +304,69 @@ class TestRtlDetection(unittest.TestCase):
         self.assertFalse(sp._is_rtl(""))
 
 
+class TestPhysicalKeyState(unittest.TestCase):
+    """Hotkeys are decided by this - a bad VK mapping wedges the whole app."""
+
+    def test_modifiers_are_up_when_nothing_is_held(self):
+        # Nothing is pressed while the suite runs, so every modifier must read
+        # False. A name missing from the table would fall through to the
+        # `keyboard` library and could answer True from stale bookkeeping.
+        for name in ("win", "alt", "shift", "ctrl",
+                     "left windows", "right windows"):
+            self.assertFalse(sp._phys_down(name), f"{name} reported as held")
+
+    def test_names_are_case_and_space_insensitive(self):
+        self.assertFalse(sp._phys_down("  WIN  "))
+
+
 class TestGeminiEndpointRouting(unittest.TestCase):
-    """Vertex must win whenever a credential exists (billing policy)."""
+    """One resolver feeds STT, prompts and TTS - a wrong branch breaks all three.
+
+    Every test pins all three sources, because whatever is in the developer's own
+    settings.json would otherwise decide the answer.
+    """
 
     def setUp(self):
-        self._cred, self._key = sp.TTS_VERTEX_CRED, sp.GEMINI_API_KEY
+        self._state = (sp.TTS_VERTEX_CRED, sp.GEMINI_API_KEY,
+                       sp.GEMINI_BASE_URL, sp.GEMINI_AUTH_TOKEN)
+        sp.TTS_VERTEX_CRED = sp.GEMINI_API_KEY = ""
+        sp.GEMINI_BASE_URL = sp.GEMINI_AUTH_TOKEN = ""
 
     def tearDown(self):
-        sp.TTS_VERTEX_CRED, sp.GEMINI_API_KEY = self._cred, self._key
+        (sp.TTS_VERTEX_CRED, sp.GEMINI_API_KEY,
+         sp.GEMINI_BASE_URL, sp.GEMINI_AUTH_TOKEN) = self._state
 
     def test_api_key_used_when_no_credential(self):
-        sp.TTS_VERTEX_CRED = ""
         sp.GEMINI_API_KEY = "AIzaTESTKEY"
         url, _ = sp._gemini_endpoint("some-model")
         self.assertIn("generativelanguage.googleapis.com", url)
 
     def test_nothing_configured_returns_none(self):
-        sp.TTS_VERTEX_CRED = ""
-        sp.GEMINI_API_KEY = ""
         url, headers = sp._gemini_endpoint("some-model")
         self.assertIsNone(url)
         self.assertIsNone(headers)
+
+    def test_base_url_wins_over_api_key(self):
+        sp.GEMINI_API_KEY = "AIzaTESTKEY"
+        sp.GEMINI_BASE_URL = "https://proxy.example.com/v1beta"
+        sp.GEMINI_AUTH_TOKEN = "tok-123"
+        url, headers = sp._gemini_endpoint("some-model")
+        self.assertEqual(
+            url, "https://proxy.example.com/v1beta/models/some-model:generateContent")
+        self.assertEqual(headers["Authorization"], "Bearer tok-123")
+        # The key must never leak into a URL that is not Google's.
+        self.assertNotIn("AIzaTESTKEY", url)
+
+    def test_base_url_without_token_sends_no_auth_header(self):
+        sp.GEMINI_BASE_URL = "https://proxy.example.com/v1beta"
+        _, headers = sp._gemini_endpoint("some-model")
+        self.assertNotIn("Authorization", headers)
+
+    def test_custom_endpoint_names_itself(self):
+        """Cloudflare-fronted proxies 403 the default python User-Agent."""
+        sp.GEMINI_BASE_URL = "https://proxy.example.com/v1beta"
+        _, headers = sp._gemini_endpoint("some-model")
+        self.assertTrue(headers.get("User-Agent", "").startswith("SpeakPaste/"))
 
 
 if __name__ == "__main__":
