@@ -57,15 +57,18 @@ def create_mcp_app():
 
         return server
     except (ImportError, ModuleNotFoundError):
-        from mcp.server.fastmcp import FastMCP
-        server = FastMCP("speakpaste")
+        try:
+            from mcp.server.fastmcp import FastMCP
+            server = FastMCP("speakpaste")
 
-        @server.tool(description=TOOL_DOC)
-        def speak_to_user(voice_text: str, session_title: str = "Assistant") -> str:
-            """Speak text directly to the user in a natural colloquial voice via SpeakPaste."""
-            return asyncio.run(_send_speak_to_speakpaste(voice_text, session_title=session_title))
+            @server.tool(description=TOOL_DOC)
+            def speak_to_user(voice_text: str, session_title: str = "Assistant") -> str:
+                """Speak text directly to the user in a natural colloquial voice via SpeakPaste."""
+                return asyncio.run(_send_speak_to_speakpaste(voice_text, session_title=session_title))
 
-        return server
+            return server
+        except (ImportError, ModuleNotFoundError):
+            raise ImportError("The 'mcp' package is required to run the MCP server. Install it via: pip install mcp")
 
 
 if __name__ == "__main__":

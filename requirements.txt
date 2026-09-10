@@ -9,3 +9,4 @@ python-dotenv
 websockets>=10.0
 SpeechRecognition
 edge-tts
+mcp>=1.0.0

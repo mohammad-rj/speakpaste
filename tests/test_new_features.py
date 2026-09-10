@@ -32,6 +32,10 @@ class TestStylePresets(unittest.TestCase):
 
 class TestMcpServer(unittest.TestCase):
     def test_create_mcp_app(self):
+        try:
+            import mcp
+        except ImportError:
+            self.skipTest("mcp package is not installed")
         server = mcp_mod.create_mcp_app()
         self.assertIsNotNone(server)
 
