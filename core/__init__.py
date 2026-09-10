@@ -1,0 +1,4 @@
+"""
+SpeakPaste Core Package
+"""
+

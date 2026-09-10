@@ -18,3 +18,11 @@ speakpaste.log.old
 # Local dev tooling
 CLAUDE.md
 .code-review-graph/
+
+# Temp test & audio outputs
+recordings/
+*.wav
+*.ogg
+*.mp3
+stdout.txt
+stderr.txt

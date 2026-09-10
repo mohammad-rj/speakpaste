@@ -15,7 +15,14 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=_sr_datas,
-    hiddenimports=['keyboard', 'speech_recognition', 'sounddevice', 'soundfile', 'numpy', 'websockets'],
+    hiddenimports=[
+        'keyboard', 'speech_recognition', 'sounddevice', 'soundfile', 'numpy', 'websockets',
+        'pystray', 'pystray._win32',
+        'core', 'core.config', 'core.win32', 'core.audio', 'core.stt', 'core.tts',
+        'core.websocket_server', 'core.ui', 'core.ui.root', 'core.ui.toast',
+        'core.ui.hotkey_dialog', 'core.ui.player_popup', 'core.ui.history_window',
+        'core.ui.settings_window', 'core.ui.tray'
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
