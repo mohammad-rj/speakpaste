@@ -11,16 +11,14 @@
 
 No account. No API key needed. Both default engines are free.
 
-**[⬇ Download SpeakPaste.exe](https://github.com/mohammad-rj/speakpaste/releases/latest)** — one file, no installer.
-
----
+**[⬇ Download SpeakPaste.exe](https://github.com/mohammad-rj/speakpaste/releases/latest)** (one file, no installer).
 
 ## Why you might want it
 
-- **It works in every app.** Not a browser extension and not a text box you paste into — text goes straight to your cursor in Word, VS Code, Telegram, a terminal, anywhere.
+- **It works in every app.** Not a browser extension and not a text box you paste into; text goes straight to your cursor in Word, VS Code, Telegram, a terminal, anywhere.
 - **It speaks your language.** Strong Persian/Farsi support, plus 100+ others. The `gemini` engine detects the language from your voice, so you never set it.
 - **It keeps mixed language intact.** Say *"برو روی branch جدید و commit رو merge کن"* and the English technical words stay in English instead of being mangled into Persian letters. Most dictation tools cannot do this.
-- **It reads back.** Long article, PDF, someone's message — select it and listen instead of reading.
+- **It reads back.** Long article, PDF, someone's message: select it and listen instead of reading.
 
 ---
 
@@ -68,12 +66,10 @@ and works even in apps that block pasting.
 `google` is the default because it needs no setup. Switch to `gemini` if you mix
 Persian and English, or if you do not want to think about language settings at all.
 
-**Optional AI rewriting** — in Settings → *Prompt*, SpeakPaste can send what you said
+**Optional AI rewriting**: in Settings → *Prompt*, SpeakPaste can send what you said
 through Gemini and type a clean English coding prompt instead of a raw transcript.
 Useful when you talk to an AI assistant in your own language but want it to receive
 polished English.
-
----
 
 ## Listening to text
 
@@ -84,9 +80,9 @@ Select text anywhere and press **Win+Shift**. A small player appears in the corn
 </p>
 
 - **⏸ / ▶** pause and resume, **⏹** stop
-- **◀◀ / ▶▶** jump between parts of a long text — pressing back mid-part replays that part from its start
-- **Seek bar** — click anywhere to jump; the tick marks show where each part begins
-- **Speed** — 0.5× to 2×, changes instantly, and the voice does not turn into a chipmunk
+- **◀◀ / ▶▶** jump between parts of a long text (pressing back mid-part replays that part from its start)
+- **Seek bar**: click anywhere to jump; the tick marks show where each part begins
+- **Speed**: 0.5× to 2×, changes instantly, and the voice does not turn into a chipmunk
 - Closes itself 30 seconds after it finishes
 
 Your clipboard is not disturbed. SpeakPaste copies the selection, reads it, and puts
@@ -99,31 +95,61 @@ Missed something? Press ◀◀ to hear that part again.
 
 | Engine | Cost | Needs | Voice |
 |---|---|---|---|
-| **`edge`** | Free | Nothing | Microsoft neural voices — Persian, English, Turkish, Arabic |
+| **`edge`** | Free | Nothing | Microsoft neural voices (Persian, English, Turkish, Arabic) |
 | `vertex` | Free credit | Google credential | Gemini TTS, and you can describe *how* it should read in plain words |
 
 The tray menu also has **Read clipboard aloud** for cases where copying with Ctrl+C
 does not work, such as inside a terminal.
 
----
+## Model Context Protocol (MCP) Integration
+
+SpeakPaste includes a native MCP server (`speakpaste_mcp.py`) allowing AI assistants (such as Claude Desktop, Cursor, Antigravity, VS Code, and other MCP clients) to speak responses aloud directly through SpeakPaste's neural voice engine.
+
+### Available Tool
+
+`speak_to_user(voice_text, session_title)`
+* `voice_text`: The spoken text output in natural conversational tone.
+* `session_title`: Optional project, agent, or conversation name (e.g. `EP`, `Assistant`). Appears as a distinct colored badge in SpeakPaste's player widget and history log.
+
+### Setup & Configuration
+
+Add SpeakPaste to your MCP client configuration (e.g. `claude_desktop_config.json`, Cursor MCP settings, or Antigravity MCP config):
+
+```json
+{
+  "mcpServers": {
+    "speakpaste": {
+      "command": "python",
+      "args": ["<path-to-speakpaste>/speakpaste_mcp.py"]
+    }
+  }
+}
+```
+
+### Key Capabilities
+
+* **Hands-Free AI Audio**: Models stream and vocalize answers directly using your selected voice style and engine.
+* **Parallel & Non-Blocking**: SpeakPaste handles STT dictation and AI voice synthesis concurrently. You can hold `Win+Alt` to speak while the AI is talking without audio stutter or state cancellation.
+* **Multi-Session Organization**: Each AI agent or session is identified and tagged by name (`session_title`). You can navigate, replay, and manage recent voice sessions directly from the floating player drawer.
+* **Consent Policy**: The tool description strictly instructs AI agents to call `speak_to_user` only when you explicitly ask for spoken output, preventing unexpected audio interruptions.
 
 ## Settings
 
 Right-click the tray icon → **Settings**. Three tabs:
 
-**Speech → Text** — engine, API keys, and the optional AI prompt rewriting.
+**Speech → Text**: engine, API keys, and the optional AI prompt rewriting.
 
-**Text → Speech** — voice engine, voice, reading speed, the player widget, and a
+**Text → Speech**: voice engine, voice, reading speed, the player widget, and a
 **Test voice** button so you can hear a change without closing the window.
 
-**General** — hotkeys, language, microphone mode, update checks.
+**General**: hotkeys, language, microphone mode, update checks.
 
 A few things worth knowing:
 
 - **Language** only matters for engines that cannot detect it themselves. With
   `gemini` it is ignored entirely. With `google`, either set it to your usual
   language or tick *Follow Windows keyboard layout* to switch with Alt+Shift.
-- **Microphone mode** — *Always on* keeps a 500 ms buffer so the start of your
+- **Microphone mode**: *Always on* keeps a 500 ms buffer so the start of your
   sentence is never clipped. *On demand* only opens the mic while the hotkey is held,
   which is the more private option. Toggle it from the tray at any time.
 - Settings live in `settings.json` next to the exe.
@@ -131,9 +157,8 @@ A few things worth knowing:
 ### Using your own Gemini endpoint
 
 By default every Gemini call goes straight to Google with your AI Studio key. If you
-run a Gemini-compatible proxy — a company gateway, a key-rotation service, anything
-that accepts the same request bodies — fill in **Base URL** and **Base URL token** on
-the Speech → Text tab and the app will call that instead:
+run a Gemini-compatible proxy (a company gateway, a key-rotation service, or any compatible proxy),
+fill in **Base URL** and **Base URL token** on the Speech → Text tab and the app will call that instead:
 
 ```
 Base URL:        https://your-proxy.example.com/v1beta
@@ -147,12 +172,10 @@ machine. Environment variables `SPEAKPASTE_GEMINI_BASE_URL` and
 
 Leave the fields empty and nothing changes.
 
----
-
 ## History
 
-Tray → **History** shows everything from this session — what you dictated and what
-was read aloud, newest first, Persian lines right-aligned.
+Tray → **History** shows everything from this session (what you dictated and what
+was read aloud, newest first, Persian lines right-aligned).
 
 **Click any line to copy it back to your clipboard.** History survives restarts.
 
