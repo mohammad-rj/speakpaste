@@ -103,6 +103,8 @@ def set_tts_state(s):
     _refresh_tray_icon()
 
 recorder.on_state_change = set_stt_state
+# A PortAudio reload would cut off a read-aloud in progress.
+recorder.can_reinit = lambda: _tts_state == "idle"
 
 
 # ─── TTS Coordinator ─────────────────────────────────────────────────────────
