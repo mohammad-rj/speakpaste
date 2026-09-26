@@ -37,7 +37,7 @@ def open_history(history_deque, get_player_fn=None, speak_fn=None):
         top.pack(fill="x")
 
         show_stt_var = tk.BooleanVar(value=True)
-        known_len    = [-1]
+        known_sig    = [None]
         click_tags   = []
 
         def _copy(text_val):
@@ -55,7 +55,7 @@ def open_history(history_deque, get_player_fn=None, speak_fn=None):
             txt.tag_bind(tag, "<Leave>", lambda e, t=tag: (txt.config(cursor="arrow"), txt.tag_config(t, background="")))
 
         def _render():
-            known_len[0] = len(history_deque)
+            known_sig[0] = _signature()
             txt.config(state="normal")
             for t in click_tags:
                 txt.tag_delete(t)
@@ -90,10 +90,20 @@ def open_history(history_deque, get_player_fn=None, speak_fn=None):
                 txt.insert("end", "\n\n")
             txt.config(state="disabled")
 
+        def _signature():
+            # The deque is capped (maxlen): once full, a new entry pushes the
+            # oldest out and the length never changes, so length alone misses
+            # every new voice. The newest entry's identity and text catch both
+            # a new entry and one filled in later (TTS rows).
+            if not history_deque:
+                return (0, None)
+            first = history_deque[0]
+            return (len(history_deque), id(first), first.get("output"), first.get("stt"))
+
         def _poll():
             if not win.winfo_exists():
                 return
-            if len(history_deque) != known_len[0]:
+            if _signature() != known_sig[0]:
                 _render()
             win.after(500, _poll)
 
