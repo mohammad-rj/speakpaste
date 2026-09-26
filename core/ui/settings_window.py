@@ -409,6 +409,9 @@ def open_settings(current_cfg, on_save_callback, on_test_voice_callback=None):
         tk.Checkbutton(tab_gen, text="Check for updates on startup", variable=updates_var, **chk_cfg).pack(anchor="w")
         notify_var = tk.BooleanVar(value=current_cfg.get("notify_errors", True))
         tk.Checkbutton(tab_gen, text="Show a notification when something fails", variable=notify_var, **chk_cfg).pack(anchor="w")
+        rdp_var = tk.BooleanVar(value=current_cfg.get("rdp_passthrough", True))
+        tk.Checkbutton(tab_gen, text="Leave hotkeys to the remote PC while a Remote Desktop window is in front",
+                       variable=rdp_var, **chk_cfg).pack(anchor="w")
 
         # ── Sticky Footer ────────────────────────────────────────────────────
         footer_area = tk.Frame(win, bg="#1e1e1e", padx=20, pady=10)
@@ -442,6 +445,7 @@ def open_settings(current_cfg, on_save_callback, on_test_voice_callback=None):
                 "gemini_stt_model":     gstt_model_var.get().strip() or GEMINI_STT_DEFAULT_MODEL,
                 "inject_mode":          inject_var.get(),
                 "notify_errors":        notify_var.get(),
+                "rdp_passthrough":      rdp_var.get(),
                 "tts_enabled":          tts_on_var.get(),
                 "tts_hotkey":           tts_hotkey_var.get().strip(),
                 "tts_engine":           tts_eng_var.get(),

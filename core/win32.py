@@ -343,6 +343,39 @@ def validate_hotkey(combo):
     return True, key
 
 
+# Remote-desktop clients. While one is in the foreground (keyboardhook:i:1),
+# Win+Alt also reaches the SpeakPaste inside the remote session, which does the
+# recording itself; the local copy must stay out of the way.
+REMOTE_CLIENT_EXES = {"mstsc.exe", "msrdc.exe", "vmconnect.exe", "rdcman.exe"}
+
+
+def get_foreground_exe():
+    """Lower-case exe name of the foreground window's process, or ""."""
+    try:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        h = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(520)
+            size = ctypes.wintypes.DWORD(len(buf))
+            if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                return os.path.basename(buf.value).lower()
+        finally:
+            kernel32.CloseHandle(h)
+    except Exception:
+        pass
+    return ""
+
+
+def remote_client_in_front():
+    return get_foreground_exe() in REMOTE_CLIENT_EXES
+
+
 def get_active_window_title():
     try:
         hwnd = user32.GetForegroundWindow()

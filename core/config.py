@@ -157,6 +157,7 @@ _DEFAULTS = {
     "gemini_stt_model":          GEMINI_STT_DEFAULT_MODEL,
     "inject_mode":               "auto",       # auto | type | paste
     "notify_errors":             True,
+    "rdp_passthrough":           True,         # ignore hotkeys while a remote-desktop window is in front
     # ── Text-to-Speech ──────────────────────────────────────────────────────────
     "tts_enabled":               True,
     "tts_hotkey":                "win+shift",

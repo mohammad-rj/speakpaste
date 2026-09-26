@@ -16,7 +16,7 @@ from core.config import (
 )
 from core.win32 import (
     active_language, type_text, get_selected_text,
-    validate_hotkey, _phys_down, get_active_window_title
+    validate_hotkey, _phys_down, get_active_window_title, remote_client_in_front
 )
 from core.audio import AudioRecorder
 from core.stt import (
@@ -344,6 +344,15 @@ def keyboard_listener():
             tts_hk = cfg.get("tts_hotkey", "win+shift")
             tts_keys = [k for k in tts_hk.split("+") if k] if (tts_enabled and tts_hk) else []
             tts_down = bool(tts_keys) and all(_phys_down(k) for k in tts_keys)
+
+            # A Remote Desktop window in front forwards the hotkey to the
+            # SpeakPaste inside that session; answering here too would record
+            # twice and type into the RDP window. Only new presses are
+            # suppressed, so a recording already running still finishes.
+            if (not is_hotkey_active and not is_tts_hotkey_active
+                    and cfg.get("rdp_passthrough", True) and remote_client_in_front()):
+                time.sleep(0.05)
+                continue
 
             if tts_down and not is_tts_hotkey_active:
                 is_tts_hotkey_active = True
