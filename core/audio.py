@@ -127,7 +127,9 @@ class AudioRecorder:
                 self._heal("missing")
                 return
             gap = now - self._last_cb
-            if gap > STALE_SEC:
+            if self._last_cb == 0.0:
+                self._heal("starved during the last recording")
+            elif gap > STALE_SEC:
                 self._heal(f"silent for {gap:.1f}s")
             elif self._failed_reopens:
                 log("Audio: input stream healthy again")

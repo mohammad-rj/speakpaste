@@ -152,7 +152,32 @@ A few things worth knowing:
 - **Microphone mode**: *Always on* keeps a 500 ms buffer so the start of your
   sentence is never clipped. *On demand* only opens the mic while the hotkey is held,
   which is the more private option. Toggle it from the tray at any time.
+- **The microphone heals itself.** If the input device disappears (a Remote Desktop
+  reconnect, a USB mic unplugged, a new default device), SpeakPaste notices within a
+  few seconds and reopens it. No restart needed.
 - Settings live in `settings.json` next to the exe.
+
+### Remote Desktop
+
+Run SpeakPaste on both your own PC and the remote one, with the same hotkey. While a
+Remote Desktop window (`mstsc`, `msrdc`, `vmconnect`, `rdcman`) is in front, the local
+copy leaves the hotkey alone and the copy inside the session does the work; everywhere
+else the local copy answers as usual. Setting: *General → Leave hotkeys to the remote
+PC while a Remote Desktop window is in front* (on by default).
+
+For this to work, the `.rdp` file needs:
+
+```
+keyboardhook:i:1        # send Windows key combinations to the remote PC
+audiocapturemode:i:1    # send your microphone to the remote PC
+```
+
+Two Windows limits to know:
+
+- Start SpeakPaste inside the session yourself (or at logon). Launched remotely
+  through the Task Scheduler it cannot see which keys are held.
+- Windows blocks a normal app from typing into an app running as administrator. If
+  the target app is elevated, run it normally, or run SpeakPaste as administrator too.
 
 ### Using your own Gemini endpoint
 
@@ -175,7 +200,8 @@ Leave the fields empty and nothing changes.
 ## History
 
 Tray → **History** shows everything from this session (what you dictated and what
-was read aloud, newest first, Persian lines right-aligned).
+was read aloud, newest first, Persian lines right-aligned). New entries appear while
+the window is open.
 
 **Click any line to copy it back to your clipboard.** History survives restarts.
 

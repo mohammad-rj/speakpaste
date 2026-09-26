@@ -16,7 +16,7 @@ from core.config import (
 )
 from core.win32 import (
     active_language, type_text, get_selected_text,
-    validate_hotkey, _phys_down, get_active_window_title, remote_client_in_front
+    validate_hotkey, _phys_down, get_active_window_title, remote_client_in_front, get_foreground_exe
 )
 from core.audio import AudioRecorder
 from core.stt import (
@@ -273,6 +273,7 @@ def speak_clipboard():
 def on_hotkey_press():
     global _session_lang
     _session_lang = active_language() if cfg.get("lang_mode") == "keyboard" else cfg.get("language", "fa")
+    log(f"Hotkey down in {get_foreground_exe() or '?'}")
     set_stt_state("recording")
     if cfg.get("stt_engine") == "google-ext" and cfg.get("prompt_mode") != "gemini-flash":
         from core.websocket_server import google_send, _ws_clients
@@ -338,6 +339,7 @@ def on_hotkey_release():
 def keyboard_listener():
     global running, is_hotkey_active, is_tts_hotkey_active
     stt_blocked = False
+    passthrough_logged = False
     while running:
         try:
             tts_enabled = cfg.get("tts_enabled", True)
@@ -351,8 +353,14 @@ def keyboard_listener():
             # suppressed, so a recording already running still finishes.
             if (not is_hotkey_active and not is_tts_hotkey_active
                     and cfg.get("rdp_passthrough", True) and remote_client_in_front()):
+                hk_keys = [k for k in cfg.get("hotkey", "win+alt").split("+") if k]
+                held = (bool(hk_keys) and all(_phys_down(k) for k in hk_keys)) or tts_down
+                if held and not passthrough_logged:
+                    log(f"Hotkey left to remote desktop ({get_foreground_exe()})")
+                passthrough_logged = held
                 time.sleep(0.05)
                 continue
+            passthrough_logged = False
 
             if tts_down and not is_tts_hotkey_active:
                 is_tts_hotkey_active = True
