@@ -3,7 +3,7 @@ import re
 import os
 import soundfile as sf
 from .root import ui_run, get_ui_root
-from ..win32 import clipboard_set_text
+from ..osapi import clipboard_set_text
 from ..config import log
 
 _history_window = None

@@ -1,5 +1,5 @@
 import tkinter as tk
-from ..win32 import _MODIFIERS
+from ..osapi import _MODIFIERS
 
 def capture_hotkey(parent, on_done):
     """Modal 'press the combination' capture dialog. Returns combo via on_done callback."""

@@ -1,0 +1,7 @@
+# Autostart example: copy to ~/.config/autostart/speakpaste.desktop and
+# replace /path/to/speakpaste with the absolute path of your checkout.
+[Desktop Entry]
+Type=Application
+Name=SpeakPaste
+Exec=/path/to/speakpaste/scripts/linux/speakpaste.sh
+X-GNOME-Autostart-enabled=true

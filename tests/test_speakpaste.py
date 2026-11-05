@@ -14,6 +14,11 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+    # pystray's Xorg backend connects to X while speakpaste is imported.
+    raise unittest.SkipTest("speakpaste imports pystray, which needs DISPLAY on Linux")
+
 import speakpaste as sp  # noqa: E402
 
 
@@ -35,11 +40,13 @@ class TestHotkeyValidation(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("nope", msg)
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows reserved-hotkey list")
     def test_rejects_windows_reserved(self):
         for combo in ("win+l", "win+x", "alt+tab", "win+e"):
             ok, _ = sp.validate_hotkey(combo)
             self.assertFalse(ok, f"{combo} is reserved by Windows")
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows reserved-hotkey list")
     def test_rejects_reserved_win_letter_even_with_extra_modifiers(self):
         # The real bug: win+alt+x looked fine and never fired, because the
         # shell takes Win+X before any application hook runs.

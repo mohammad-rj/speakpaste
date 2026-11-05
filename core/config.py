@@ -11,9 +11,13 @@ VERSION     = "1.13.0"
 GITHUB_REPO = "mohammad-rj/SpeakPaste"
 GITHUB_URL  = f"https://github.com/{GITHUB_REPO}"
 
-APP_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
-if not os.access(APP_DIR, os.W_OK):
-    APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
+if sys.platform == "win32":
+    APP_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
+    if not os.access(APP_DIR, os.W_OK):
+        APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
+        os.makedirs(APP_DIR, exist_ok=True)
+else:
+    APP_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), APP_NAME)
     os.makedirs(APP_DIR, exist_ok=True)
 
 SETTINGS_FILE  = os.path.join(APP_DIR, "settings.json")

@@ -1,41 +1,73 @@
 import os
 import sys
-import winreg
 import pystray
 from PIL import Image, ImageDraw
 from ..config import APP_NAME, log, logs
 
-STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+if sys.platform == "win32":
+    import winreg
 
+    STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
-def _get_exe_path():
-    if getattr(sys, "frozen", False):
-        return sys.executable
-    return f'pythonw "{os.path.abspath(sys.argv[0])}"'
+    def _get_exe_path():
+        if getattr(sys, "frozen", False):
+            return sys.executable
+        return f'pythonw "{os.path.abspath(sys.argv[0])}"'
 
+    def is_in_startup():
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_READ)
+            winreg.QueryValueEx(key, APP_NAME)
+            winreg.CloseKey(key)
+            return True
+        except OSError:
+            return False
 
-def is_in_startup():
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_READ)
-        winreg.QueryValueEx(key, APP_NAME)
-        winreg.CloseKey(key)
-        return True
-    except OSError:
-        return False
+    def toggle_startup():
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_SET_VALUE)
+            if is_in_startup():
+                winreg.DeleteValue(key, APP_NAME)
+                log("Removed from startup")
+            else:
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, _get_exe_path())
+                log("Added to startup")
+            winreg.CloseKey(key)
+        except Exception as e:
+            log(f"Startup error: {e}")
 
+else:
+    AUTOSTART_FILE = os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+        "autostart", f"{APP_NAME}.desktop",
+    )
 
-def toggle_startup():
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_SET_VALUE)
-        if is_in_startup():
-            winreg.DeleteValue(key, APP_NAME)
-            log("Removed from startup")
-        else:
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, _get_exe_path())
-            log("Added to startup")
-        winreg.CloseKey(key)
-    except Exception as e:
-        log(f"Startup error: {e}")
+    def _get_exe_path():
+        if getattr(sys, "frozen", False):
+            return f'"{sys.executable}"'
+        return f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}"'
+
+    def is_in_startup():
+        return os.path.isfile(AUTOSTART_FILE)
+
+    def toggle_startup():
+        try:
+            if is_in_startup():
+                os.remove(AUTOSTART_FILE)
+                log("Removed from startup")
+            else:
+                os.makedirs(os.path.dirname(AUTOSTART_FILE), exist_ok=True)
+                with open(AUTOSTART_FILE, "w", encoding="utf-8") as f:
+                    f.write(
+                        "[Desktop Entry]\n"
+                        "Type=Application\n"
+                        f"Name={APP_NAME}\n"
+                        f"Exec={_get_exe_path()}\n"
+                        "X-GNOME-Autostart-enabled=true\n"
+                    )
+                log("Added to startup")
+        except Exception as e:
+            log(f"Startup error: {e}")
 
 
 def create_icon(state="idle"):

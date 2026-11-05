@@ -4,7 +4,7 @@ import os
 
 from .root import ui_run, get_ui_root
 from .hotkey_dialog import capture_hotkey
-from ..win32 import validate_hotkey
+from ..osapi import validate_hotkey
 from ..config import (
     VERSION, GITHUB_URL, TTS_STYLE_PRESETS, TTS_DEFAULT_STYLE,
     TTS_EDGE_VOICES, TTS_VERTEX_VOICES, TTS_VERTEX_MODELS,

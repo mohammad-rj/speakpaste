@@ -10,7 +10,6 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core.config as cfg
-import core.win32 as w32
 import core.stt as stt
 import speakpaste_mcp as mcp_mod
 

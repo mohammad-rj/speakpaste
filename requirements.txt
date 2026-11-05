@@ -1,4 +1,5 @@
-keyboard
+keyboard; sys_platform == "win32"
+python-xlib; sys_platform == "linux"
 sounddevice
 soundfile
 numpy

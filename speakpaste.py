@@ -14,7 +14,7 @@ from core.config import (
     APP_NAME, VERSION, GITHUB_REPO, GITHUB_URL, _DEFAULTS, TTS_STYLE_PRESETS,
     validate_ws_port, load_settings, save_settings, load_history, save_history, log
 )
-from core.win32 import (
+from core.osapi import (
     active_language, type_text, get_selected_text,
     validate_hotkey, _phys_down, get_active_window_title, remote_client_in_front, get_foreground_exe
 )
@@ -260,7 +260,7 @@ def on_tts_hotkey():
 
 
 def speak_clipboard():
-    from core.win32 import clipboard_get_text
+    from core.osapi import clipboard_get_text
     txt = (clipboard_get_text() or "").strip()
     if txt:
         threading.Thread(target=speak_text, args=(txt,), daemon=True).start()

@@ -45,6 +45,45 @@ python speakpaste.py
 ```
 </details>
 
+### Linux (X11)
+
+SpeakPaste runs from source on an X11 desktop. Tested on Xubuntu 26.04 under xrdp.
+Global hotkeys and paste need X11; Wayland is unsupported.
+
+```bash
+sudo apt-get install xclip xdotool python3-tk libportaudio2 python3-gi \
+    gir1.2-ayatanaappindicator3-0.1 python3-venv
+git clone https://github.com/mohammad-rj/speakpaste.git
+cd speakpaste
+python3 -m venv --system-site-packages .venv   # system Python, for PyGObject
+.venv/bin/pip install -r requirements.txt
+PYSTRAY_BACKEND=appindicator .venv/bin/python speakpaste.py
+```
+
+Use `PYSTRAY_BACKEND=appindicator`: the Xorg backend shows the icon with no menu.
+`scripts/linux/speakpaste.sh` does this for you, and
+`scripts/linux/speakpaste.desktop` is an autostart example for `~/.config/autostart`.
+
+Settings live in `~/.config/SpeakPaste/settings.json`, next to the history and the log.
+
+**XFCE tray icon missing.** `ayatana-indicator-application-service` may own
+`org.kde.StatusNotifierWatcher`. Disable it, then reload the panel:
+
+```bash
+cp /etc/xdg/autostart/ayatana-indicator-application.desktop ~/.config/autostart/
+echo Hidden=true >> ~/.config/autostart/ayatana-indicator-application.desktop
+systemctl --user mask --now ayatana-indicator-application.service
+xfce4-panel -r
+```
+
+**Microphone under xrdp.** Exactly one `pipewire-module-xrdp` loader
+(`/usr/libexec/pipewire-module-xrdp/load_pw_modules.sh`) may run.
+
+1. After any `xrdp-chansrv` restart, run the loader again.
+2. Set the default source: `pactl set-default-source xrdp-source`.
+3. Reconnect the RDP client so the AUDIO_INPUT channel opens.
+4. Start SpeakPaste after that.
+
 ---
 
 ## Typing with your voice
