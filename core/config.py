@@ -7,7 +7,7 @@ import datetime
 from collections import deque
 
 APP_NAME    = "SpeakPaste"
-VERSION     = "1.14.0"
+VERSION     = "1.14.1"
 GITHUB_REPO = "mohammad-rj/SpeakPaste"
 GITHUB_URL  = f"https://github.com/{GITHUB_REPO}"
 

@@ -1,6 +1,7 @@
 import sounddevice as sd
 import numpy as np
 import soundfile as sf
+import sys
 import tempfile
 import threading
 import time
@@ -21,6 +22,23 @@ WATCHDOG_SEC     = 2.0   # health-check period
 MIN_DELIVERY     = 0.5   # captured/elapsed ratio below which a recording was starved
 REINIT_AFTER     = 2     # plain reopens in a row before PortAudio itself is reloaded
 MAX_BACKOFF_SEC  = 30.0  # retry ceiling while no input device exists at all
+
+# Linux desktop reached over RDP (xrdp 0.10.1 + pipewire-module-xrdp). Two
+# faults of that microphone path, both cured by stopping the stream and
+# starting it again with a gap:
+# - xrdp queues the client's mic audio and never trims the queue; the laptop
+#   sends ~0.1% faster than PipeWire reads, so an always-open stream falls
+#   behind by about 1 ms every second until a restart empties the queue.
+# - xrdp drops a START that arrives while it is still closing the previous
+#   mic channel (audin_start returns early). The mic then stays closed and
+#   the stream delivers pure digital zeros, which a real mic never does.
+XRDP_FIXES       = sys.platform.startswith("linux")
+REFRESH_AGE_SEC  = 45.0  # restart an idle always-on stream this often
+REFRESH_IDLE_SEC = 3.0   # but never sooner than this after a recording
+REFRESH_GAP_SEC  = 1.0   # stop-to-start gap, longer than xrdp's channel close
+DEAD_ZERO_SEC    = 1.0   # this much pure-zero audio means the mic channel is dead
+DEAD_RETRY_SEC   = 10.0  # at most one dead-channel restart per this period
+TAIL_SEC         = 0.4   # keep recording after key release; RDP audio arrives late
 
 
 class AudioRecorder:
@@ -43,9 +61,15 @@ class AudioRecorder:
         self._failed_reopens = 0
         self._next_retry = 0.0
         self._watchdog = None
+        self._started_at = time.monotonic()
+        self._last_rec_end = 0.0
+        self._last_refresh = 0.0
+        self._zero_frames = 0
 
     def _audio_callback(self, indata, frames, time_info, status):
         self._last_cb = time.monotonic()
+        if XRDP_FIXES:
+            self._zero_frames = 0 if np.any(indata) else self._zero_frames + frames
         chunk = indata.copy()
         if self.is_recording:
             self._rec_frames += frames
@@ -86,7 +110,8 @@ class AudioRecorder:
                     channels=1,
                     callback=self._audio_callback,
                 )
-                self._last_cb = time.monotonic()
+                self._last_cb = self._started_at = time.monotonic()
+                self._zero_frames = 0
                 if self._should_run():
                     stream.start()
             except Exception as e:
@@ -115,6 +140,42 @@ class AudioRecorder:
             self._next_retry = time.monotonic() + STALE_SEC
         return ok
 
+    def _refresh(self, why):
+        """Stop the running stream, wait REFRESH_GAP_SEC, start it again.
+        The same stream object is reused: building a new one makes PortAudio
+        open, close and reopen the device within 50 ms, which is exactly the
+        fast stop/start xrdp drops."""
+        with self._stream_lock:
+            s = self.audio_stream
+            if s is None or not self._should_run():
+                return
+            try:
+                s.stop()
+            except Exception:
+                pass
+            time.sleep(REFRESH_GAP_SEC)
+            self._pre_roll_buf.clear()
+            self._zero_frames = 0
+            self._last_refresh = self._started_at = self._last_cb = time.monotonic()
+            try:
+                s.start()
+            except Exception as e:
+                log(f"Audio: restart after {why} failed: {e}")
+                self._heal("failed to restart")
+                return
+
+    def _xrdp_check(self, now):
+        if (not XRDP_FIXES or self.mic_mode == "on_demand" or self.is_recording
+                or self.audio_stream is None):
+            return
+        if (self._zero_frames >= DEAD_ZERO_SEC * SAMPLE_RATE
+                and now - self._last_refresh >= DEAD_RETRY_SEC):
+            log("Audio: mic delivers pure zeros (xrdp channel dead) - restarting")
+            self._refresh("xrdp mic channel dead")
+        elif (now - self._started_at >= REFRESH_AGE_SEC
+                and now - self._last_rec_end >= REFRESH_IDLE_SEC):
+            self._refresh("xrdp mic queue reset")
+
     def check_health(self, now=None):
         """One watchdog tick. Public so tests can drive it without a thread."""
         now = time.monotonic() if now is None else now
@@ -134,6 +195,8 @@ class AudioRecorder:
             elif self._failed_reopens:
                 log("Audio: input stream healthy again")
                 self._failed_reopens = 0
+            else:
+                self._xrdp_check(now)
 
     def _watchdog_loop(self):
         while True:
@@ -178,6 +241,9 @@ class AudioRecorder:
                     or time.monotonic() - self._last_cb > STALE_SEC / 2):
                 self._pre_roll_buf.clear()
                 self._heal("dead at record start")
+            elif (XRDP_FIXES and self.mic_mode != "on_demand"
+                    and self._zero_frames >= DEAD_ZERO_SEC * SAMPLE_RATE / 2):
+                self._refresh("xrdp mic channel dead at record start")
             self.is_recording = True
             if self.mic_mode == "on_demand":
                 started = False
@@ -205,6 +271,7 @@ class AudioRecorder:
             if not self.is_recording:
                 return
             self.is_recording = False
+            self._last_rec_end = time.monotonic()
             if self.mic_mode == "on_demand" and self.audio_stream:
                 try:
                     self.audio_stream.stop()
@@ -215,10 +282,13 @@ class AudioRecorder:
             self.on_state_change("idle")
 
     def stop_recording(self):
+        if XRDP_FIXES and self.is_recording:
+            time.sleep(TAIL_SEC)
         with self._lock:
             if not self.is_recording:
                 return None
             self.is_recording = False
+            self._last_rec_end = time.monotonic()
             elapsed = time.monotonic() - self._rec_started
             delivered = self._rec_frames / SAMPLE_RATE
             if self.mic_mode == "on_demand" and self.audio_stream:
